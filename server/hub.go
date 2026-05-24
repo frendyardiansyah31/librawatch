@@ -120,6 +120,7 @@ type Hub struct {
 	clients       map[string]*Client
 	db            *DB
 	alerter       *Alerter
+	deployer      *Deployer
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
 }
 
@@ -234,6 +235,10 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 		if wasOffline && h.alerter != nil {
 			go h.alerter.CheckRecovery(msg.AgentID, msg.Hostname)
 		}
+
+		if h.deployer != nil {
+			go h.deployer.DispatchPending(msg.AgentID)
+		}
 	}
 
 	now := nowWIB()
@@ -293,6 +298,20 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 		"job_id", msg.JobID,
 		"agent_id", msg.AgentID,
 		"status", msg.Status)
+
+	// Mark job done when all target results are no longer pending
+	if results, err := h.db.GetDeployResultsByJobID(msg.JobID); err == nil {
+		allDone := true
+		for _, r := range results {
+			if r.Status == "pending" {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			_ = h.db.UpdateDeployJobStatus(msg.JobID, "done")
+		}
+	}
 }
 
 func (h *Hub) handleLogResult(c *Client, msg *IncomingMessage) {

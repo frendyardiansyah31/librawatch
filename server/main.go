@@ -40,6 +40,9 @@ func main() {
 	hub.alerter = alerter
 	go alerter.StartOfflineChecker()
 
+	deployer := NewDeployer(db, hub)
+	hub.deployer = deployer
+
 	// Purge metrics older than 24h every hour
 	go func() {
 		ticker := time.NewTicker(time.Hour)
@@ -65,7 +68,7 @@ func main() {
 	})
 
 	api := r.Group("/api")
-	RegisterAPIRoutes(api, db, hub, cfg.Uploads.Path)
+	RegisterAPIRoutes(api, db, hub, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	slog.Info("Library Monitor started", "address", addr)

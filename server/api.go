@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, uploadsPath string) {
+func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, deployer *Deployer, uploadsPath string, maxUploadMB int64) {
 	// ── Agents ──────────────────────────────────────────────────────────
 
 	api.GET("/agents", func(c *gin.Context) {
@@ -135,10 +136,28 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, uploadsPath strin
 	})
 
 	// ── Deploy ───────────────────────────────────────────────────────────
-	// Full implementation in Milestone 4; stubs return 501 until then.
 
 	api.POST("/deploy", func(c *gin.Context) {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "deploy available in Milestone 4"})
+		var req struct {
+			Type    string   `json:"type"`
+			Payload string   `json:"payload"`
+			Args    string   `json:"args"`
+			Targets []string `json:"targets"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if req.Type == "" || req.Payload == "" || len(req.Targets) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "type, payload, and targets are required"})
+			return
+		}
+		job, err := deployer.CreateJob(req.Type, req.Payload, req.Args, req.Targets)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, job)
 	})
 
 	api.GET("/deploy", func(c *gin.Context) {
@@ -169,7 +188,26 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, uploadsPath strin
 	})
 
 	api.POST("/upload", func(c *gin.Context) {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "upload available in Milestone 4"})
+		file, err := c.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if maxUploadMB > 0 && file.Size > maxUploadMB*1024*1024 {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file exceeds size limit"})
+			return
+		}
+		filename := filepath.Base(file.Filename)
+		if filename == "." || filename == string(filepath.Separator) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid filename"})
+			return
+		}
+		dest := filepath.Join(uploadsPath, filename)
+		if err := c.SaveUploadedFile(file, dest); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"filename": filename})
 	})
 
 	api.GET("/file/:filename", func(c *gin.Context) {

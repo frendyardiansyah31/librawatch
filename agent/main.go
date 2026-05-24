@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,10 +21,11 @@ const (
 )
 
 var (
-	agentLogger *log.Logger
-	hostname    string
-	agentIP     string
-	meshID      string
+	agentLogger   *log.Logger
+	hostname      string
+	agentIP       string
+	meshID        string
+	serverBaseURL string // HTTP base URL derived from WebSocket URL, used for file downloads
 )
 
 func main() {
@@ -44,6 +46,9 @@ func main() {
 	}
 
 	serverURL := getServerURL()
+	serverBaseURL = strings.Replace(serverURL, "ws://", "http://", 1)
+	serverBaseURL = strings.Replace(serverBaseURL, "wss://", "https://", 1)
+	serverBaseURL = strings.TrimSuffix(serverBaseURL, "/ws")
 	logMsg("INFO", "Agent started, ID: %s, Server: %s, Hostname: %s", agentID, serverURL, hostname)
 
 	connectLoop(agentID, serverURL)
@@ -157,9 +162,9 @@ func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
 
 	switch msgType {
 	case "exec":
-		// Milestone 4: executeCommand(conn, agentID, msg)
+		go executeCommand(conn, agentID, msg)
 	case "file_deploy":
-		// Milestone 4: deployFile(conn, agentID, msg)
+		go deployFile(conn, agentID, msg)
 	case "get_logs":
 		// Milestone 6: sendLogLines(conn, agentID, msg)
 	}
