@@ -1,3 +1,17 @@
 .claude/
 CLAUDE.md
 docs/
+
+# Compiled binaries
+*.exe
+library-server
+library-server~
+
+# SQLite runtime files
+*.db
+*.db-shm
+*.db-wal
+
+# Generated runtime directories
+logs/
+uploads/
