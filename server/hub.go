@@ -119,6 +119,7 @@ type Hub struct {
 	mu            sync.RWMutex
 	clients       map[string]*Client
 	db            *DB
+	alerter       *Alerter
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
 }
 
@@ -217,11 +218,22 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 		return
 	}
 
-	// Register client under agentID on first metrics message
+	// Register client under agentID on first metrics message.
+	// Check prior status before UpsertAgent overwrites it to "online".
 	if c.agentID == "" {
+		wasOffline := false
+		if h.alerter != nil {
+			existing, _ := h.db.GetAgentByID(msg.AgentID)
+			wasOffline = existing != nil && existing.Status == "offline"
+		}
+
 		c.agentID = msg.AgentID
 		h.addClient(c)
 		slog.Info("agent connected", "agent_id", msg.AgentID, "hostname", msg.Hostname, "ip", msg.IP)
+
+		if wasOffline && h.alerter != nil {
+			go h.alerter.CheckRecovery(msg.AgentID, msg.Hostname)
+		}
 	}
 
 	now := nowWIB()
@@ -258,6 +270,10 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 			"cpu", msg.CPU,
 			"ram", msg.RAM)
 		h.lastMetricLog.Store(msg.AgentID, now)
+	}
+
+	if h.alerter != nil {
+		h.alerter.CheckMetrics(msg.AgentID, msg.Hostname, msg.CPU, msg.RAM, msg.Processes)
 	}
 }
 

@@ -36,6 +36,10 @@ func main() {
 
 	hub := NewHub(db)
 
+	alerter := NewAlerter(db)
+	hub.alerter = alerter
+	go alerter.StartOfflineChecker()
+
 	// Purge metrics older than 24h every hour
 	go func() {
 		ticker := time.NewTicker(time.Hour)
