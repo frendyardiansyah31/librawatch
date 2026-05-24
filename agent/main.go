@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,6 +28,61 @@ var (
 	meshID        string
 	serverBaseURL string // HTTP base URL derived from WebSocket URL, used for file downloads
 )
+
+type rotWriter struct {
+	mu      sync.Mutex
+	path    string
+	maxSize int64
+	maxBack int
+	file    *os.File
+	size    int64
+}
+
+func newRotWriter(path string, maxSizeMB int64, maxBackup int) (*rotWriter, error) {
+	w := &rotWriter{path: path, maxSize: maxSizeMB * 1024 * 1024, maxBack: maxBackup}
+	return w, w.open()
+}
+
+func (w *rotWriter) open() error {
+	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	w.file, w.size = f, fi.Size()
+	return nil
+}
+
+func (w *rotWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.size+int64(len(p)) > w.maxSize {
+		w.rotate()
+	}
+	if w.file == nil {
+		return 0, fmt.Errorf("log file unavailable")
+	}
+	n, err := w.file.Write(p)
+	w.size += int64(n)
+	return n, err
+}
+
+func (w *rotWriter) rotate() {
+	w.file.Close()
+	w.file = nil
+	for i := w.maxBack; i >= 1; i-- {
+		src := w.path
+		if i > 1 {
+			src = fmt.Sprintf("%s.%d", w.path, i-1)
+		}
+		os.Rename(src, fmt.Sprintf("%s.%d", w.path, i))
+	}
+	_ = w.open()
+}
 
 func main() {
 	initLogger()
@@ -56,12 +112,11 @@ func main() {
 
 func initLogger() {
 	_ = os.MkdirAll(agentBaseDir, 0755)
-	f, err := os.OpenFile(agentLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		agentLogger = log.New(os.Stdout, "", 0)
-		return
+	logOut := io.Writer(os.Stdout)
+	if rw, err := newRotWriter(agentLogFile, 5, 1); err == nil {
+		logOut = io.MultiWriter(os.Stdout, rw)
 	}
-	agentLogger = log.New(io.MultiWriter(os.Stdout, f), "", 0)
+	agentLogger = log.New(logOut, "", 0)
 }
 
 func logMsg(level, format string, args ...interface{}) {
@@ -166,7 +221,7 @@ func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
 	case "file_deploy":
 		go deployFile(conn, agentID, msg)
 	case "get_logs":
-		// Milestone 6: sendLogLines(conn, agentID, msg)
+		go sendLogLines(conn, agentID, msg)
 	}
 }
 
@@ -182,4 +237,28 @@ func getLocalIP() string {
 		}
 	}
 	return "unknown"
+}
+
+func sendLogLines(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+	lines := 50
+	if v, ok := msg["lines"].(float64); ok && v > 0 {
+		lines = int(v)
+	}
+	data, err := os.ReadFile(agentLogFile)
+	var output string
+	if err != nil {
+		output = fmt.Sprintf("error reading log: %v", err)
+	} else {
+		parts := strings.Split(string(data), "\n")
+		if len(parts) > lines {
+			parts = parts[len(parts)-lines:]
+		}
+		output = strings.Join(parts, "\n")
+	}
+	resp, _ := json.Marshal(map[string]interface{}{
+		"type":     "log_result",
+		"agent_id": agentID,
+		"output":   output,
+	})
+	conn.WriteMessage(websocket.TextMessage, resp)
 }

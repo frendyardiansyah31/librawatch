@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -236,10 +238,43 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 	// Full implementation in Milestone 6.
 
 	api.GET("/logs", func(c *gin.Context) {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "logs available in Milestone 6"})
+		lines, _ := strconv.Atoi(c.DefaultQuery("lines", "100"))
+		if lines <= 0 || lines > 10000 {
+			lines = 100
+		}
+		output, err := tailFile("./logs/server.log", lines)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"lines": output})
 	})
 
 	api.GET("/agents/:id/logs", func(c *gin.Context) {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "agent logs available in Milestone 6"})
+		lines, _ := strconv.Atoi(c.DefaultQuery("lines", "50"))
+		if lines <= 0 || lines > 1000 {
+			lines = 50
+		}
+		output, err := hub.RequestAgentLogs(c.Param("id"), lines)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"lines": output})
 	})
+}
+
+func tailFile(path string, n int) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	lines := strings.Split(string(data), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n"), nil
 }

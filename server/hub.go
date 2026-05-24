@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -122,6 +123,7 @@ type Hub struct {
 	alerter       *Alerter
 	deployer      *Deployer
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
+	logWaiters    sync.Map // agentID → chan string, pending log relay
 }
 
 func NewHub(db *DB) *Hub {
@@ -315,9 +317,34 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 }
 
 func (h *Hub) handleLogResult(c *Client, msg *IncomingMessage) {
-	// Log relay: agent sends back log lines, stored temporarily for API response.
-	// Full implementation in Milestone 6.
-	_ = c
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = msg.AgentID
+	}
+	if v, ok := h.logWaiters.Load(agentID); ok {
+		ch := v.(chan string)
+		select {
+		case ch <- msg.Output:
+		default:
+		}
+	}
+}
+
+func (h *Hub) RequestAgentLogs(agentID string, lines int) (string, error) {
+	ch := make(chan string, 1)
+	h.logWaiters.Store(agentID, ch)
+	defer h.logWaiters.Delete(agentID)
+
+	if !h.SendToAgent(agentID, &OutgoingMessage{Type: "get_logs", Lines: lines}) {
+		return "", fmt.Errorf("agent not online")
+	}
+
+	select {
+	case output := <-ch:
+		return output, nil
+	case <-time.After(15 * time.Second):
+		return "", fmt.Errorf("agent log request timed out")
+	}
 }
 
 // ─── WebSocket Endpoint ────────────────────────────────────────────────────

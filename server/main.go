@@ -2,15 +2,81 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
+type rotWriter struct {
+	mu      sync.Mutex
+	path    string
+	maxSize int64
+	maxBack int
+	file    *os.File
+	size    int64
+}
+
+func newRotWriter(path string, maxSizeMB int64, maxBackup int) (*rotWriter, error) {
+	w := &rotWriter{path: path, maxSize: maxSizeMB * 1024 * 1024, maxBack: maxBackup}
+	return w, w.open()
+}
+
+func (w *rotWriter) open() error {
+	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	w.file, w.size = f, fi.Size()
+	return nil
+}
+
+func (w *rotWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.size+int64(len(p)) > w.maxSize {
+		w.rotate()
+	}
+	if w.file == nil {
+		return 0, fmt.Errorf("log file unavailable")
+	}
+	n, err := w.file.Write(p)
+	w.size += int64(n)
+	return n, err
+}
+
+func (w *rotWriter) rotate() {
+	w.file.Close()
+	w.file = nil
+	for i := w.maxBack; i >= 1; i-- {
+		src := w.path
+		if i > 1 {
+			src = fmt.Sprintf("%s.%d", w.path, i-1)
+		}
+		os.Rename(src, fmt.Sprintf("%s.%d", w.path, i))
+	}
+	_ = w.open()
+}
+
 func main() {
+	if err := os.MkdirAll("./logs", 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "logs dir creation failed: %v\n", err)
+	}
+	logOut := io.Writer(os.Stdout)
+	if rw, err := newRotWriter("./logs/server.log", 10, 3); err == nil {
+		logOut = io.MultiWriter(os.Stdout, rw)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logOut, nil)))
+
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
