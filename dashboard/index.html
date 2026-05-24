@@ -1,49 +1,362 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Library Monitor — Jusuf Kalla Library UIII</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: system-ui, -apple-system, sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
-            padding: 2rem;
-        }
-        h1 { color: #38bdf8; font-size: 1.5rem; margin-bottom: 0.5rem; }
-        .subtitle { color: #64748b; margin-bottom: 2rem; font-size: 0.9rem; }
-        .card {
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-            max-width: 600px;
-        }
-        .card h2 { color: #94a3b8; font-size: 1rem; margin-bottom: 0.75rem; }
-        .status { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
-        .dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; }
-        a { color: #38bdf8; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-        .note { color: #64748b; font-size: 0.8rem; margin-top: 1rem; }
-    </style>
-</head>
-<body>
-    <h1>Library Monitor</h1>
-    <p class="subtitle">Jusuf Kalla Library UIII — PC Monitoring System</p>
-
-    <div class="card">
-        <h2>Server Status</h2>
-        <div class="status">
-            <div class="dot"></div>
-            <span>Server running (Milestone 1 — Foundation)</span>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Library Monitor — UIII</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="header-left">
+        <h1>Library Monitor</h1>
+        <span class="subtitle">Jusuf Kalla Library — UIII</span>
+      </div>
+      <div class="header-stats">
+        <div class="stat">
+          <span class="stat-num green" id="stat-online">—</span>
+          <span class="stat-label">Online</span>
         </div>
-        <p>
-            <a href="/api/agents">GET /api/agents</a> — agent list<br>
-        </p>
-        <p class="note">Full dashboard UI akan diimplementasikan pada Milestone 5.</p>
+        <div class="stat">
+          <span class="stat-num red" id="stat-offline">—</span>
+          <span class="stat-label">Offline</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num orange" id="stat-alerts">—</span>
+          <span class="stat-label">Alert hari ini</span>
+        </div>
+      </div>
+      <button class="btn-icon" onclick="openSettings()" title="Pengaturan">
+        ⚙
+      </button>
+    </header>
+
+    <nav>
+      <button
+        class="tab-btn active"
+        data-tab="agents"
+        onclick="showTab('agents')"
+      >
+        PC / Agents
+      </button>
+      <button class="tab-btn" data-tab="deploy" onclick="showTab('deploy')">
+        Deploy
+      </button>
+      <button class="tab-btn" data-tab="alerts" onclick="showTab('alerts')">
+        Alerts
+      </button>
+      <button class="tab-btn" data-tab="logs" onclick="showTab('logs')">
+        Log Server
+      </button>
+    </nav>
+
+    <main>
+      <!-- ── Agents ─────────────────────────────────────────────────────────── -->
+      <div id="tab-agents" class="tab-content active">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 26px"></th>
+                <th>Hostname</th>
+                <th>IP</th>
+                <th>CPU</th>
+                <th>RAM</th>
+                <th>Proses Teratas</th>
+                <th>Terakhir Terlihat</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="agents-tbody">
+              <tr>
+                <td colspan="8" class="empty">Memuat data…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Deploy ─────────────────────────────────────────────────────────── -->
+      <div id="tab-deploy" class="tab-content">
+        <div class="deploy-layout">
+          <div class="panel deploy-agents-panel">
+            <div class="panel-hdr">
+              <strong>Pilih PC</strong>
+              <div class="btn-row">
+                <button class="btn-sm" onclick="selectTargets('all')">
+                  Semua
+                </button>
+                <button class="btn-sm" onclick="selectTargets('online')">
+                  Online
+                </button>
+                <button class="btn-sm" onclick="selectTargets('none')">
+                  Reset
+                </button>
+              </div>
+            </div>
+            <div id="deploy-agent-list" class="agent-checklist"></div>
+          </div>
+
+          <div class="panel deploy-cmd-panel">
+            <div class="inner-tabs">
+              <button
+                class="inner-tab active"
+                data-dtab="ps"
+                onclick="showDTab('ps')"
+              >
+                PowerShell
+              </button>
+              <button
+                class="inner-tab"
+                data-dtab="winget"
+                onclick="showDTab('winget')"
+              >
+                Winget
+              </button>
+              <button
+                class="inner-tab"
+                data-dtab="file"
+                onclick="showDTab('file')"
+              >
+                File Deploy
+              </button>
+            </div>
+
+            <div id="dtab-ps" class="deploy-tab active">
+              <label>Perintah PowerShell:</label>
+              <textarea
+                id="ps-cmd"
+                rows="6"
+                placeholder="Write-Output 'hello'&#10;Get-Service | Where Status -eq Running"
+              ></textarea>
+              <button class="btn-primary" onclick="submitDeploy('ps')">
+                ▶ Jalankan
+              </button>
+            </div>
+
+            <div id="dtab-winget" class="deploy-tab">
+              <label>Package ID Winget:</label>
+              <input
+                id="wg-pkg"
+                type="text"
+                placeholder="Notepad++.Notepad++"
+              />
+              <div class="radio-row">
+                <label
+                  ><input
+                    type="radio"
+                    name="wg-action"
+                    value="install"
+                    checked
+                  />
+                  Install</label
+                >
+                <label
+                  ><input type="radio" name="wg-action" value="uninstall" />
+                  Uninstall</label
+                >
+              </div>
+              <button class="btn-primary" onclick="submitDeploy('winget')">
+                ▶ Jalankan
+              </button>
+            </div>
+
+            <div id="dtab-file" class="deploy-tab">
+              <label>Upload installer (.exe, .msi, .bat, .ps1):</label>
+              <div class="upload-row">
+                <input
+                  type="file"
+                  id="file-input"
+                  accept=".exe,.msi,.bat,.ps1"
+                />
+                <button class="btn-sm" onclick="uploadFile()">Upload</button>
+              </div>
+              <div id="upload-status"></div>
+              <label>Argumen (opsional):</label>
+              <input id="file-args" type="text" placeholder="/S /silent" />
+              <button
+                class="btn-primary"
+                id="btn-deploy-file"
+                onclick="submitDeploy('file')"
+                disabled
+              >
+                ▶ Deploy File
+              </button>
+            </div>
+          </div>
+        </div>
+        <!-- deploy-layout -->
+
+        <div class="panel" style="margin-top: 16px">
+          <div class="panel-hdr">
+            <strong>Riwayat Deploy</strong>
+            <button class="btn-sm" onclick="loadDeployHistory()">
+              ↻ Refresh
+            </button>
+          </div>
+          <div id="deploy-history" style="padding: 8px"></div>
+        </div>
+      </div>
+      <!-- tab-deploy -->
+
+      <!-- ── Alerts ─────────────────────────────────────────────────────────── -->
+      <div id="tab-alerts" class="tab-content">
+        <div class="panel">
+          <div class="panel-hdr">
+            <strong>Alert Terbaru</strong>
+            <button class="btn-sm" onclick="loadAlerts()">↻ Refresh</button>
+          </div>
+          <div id="alerts-list"></div>
+        </div>
+      </div>
+
+      <!-- ── Logs ───────────────────────────────────────────────────────────── -->
+      <div id="tab-logs" class="tab-content">
+        <div class="panel">
+          <div class="panel-hdr">
+            <strong>Log Server</strong>
+            <button class="btn-sm" onclick="loadLogs()">↻ Refresh</button>
+          </div>
+          <pre id="logs-content" class="log-viewer">Memuat…</pre>
+        </div>
+      </div>
+    </main>
+
+    <!-- ── Settings Modal ────────────────────────────────────────────────────── -->
+    <div
+      id="modal-settings"
+      class="modal-overlay"
+      onclick="closeSettings(event)"
+    >
+      <div class="modal">
+        <div class="modal-hdr">
+          <h2>Pengaturan</h2>
+          <button class="btn-close" onclick="closeSettings()">✕</button>
+        </div>
+        <div class="modal-body">
+          <section>
+            <h3>Threshold Alert</h3>
+            <div class="form-row">
+              <label>CPU Threshold (%)</label>
+              <input id="s-cpu" type="number" min="1" max="100" />
+            </div>
+            <div class="form-row">
+              <label>RAM Threshold (%)</label>
+              <input id="s-ram" type="number" min="1" max="100" />
+            </div>
+            <div class="form-row">
+              <label>Offline setelah (menit)</label>
+              <input id="s-offline" type="number" min="1" />
+            </div>
+            <div class="form-row">
+              <label>Blacklist Aplikasi (satu per baris)</label>
+              <textarea
+                id="s-blacklist"
+                rows="5"
+                placeholder="steam.exe&#10;discord.exe"
+              ></textarea>
+            </div>
+          </section>
+
+          <section>
+            <h3>Telegram</h3>
+            <div class="form-row">
+              <label>Bot Token</label>
+              <input id="s-tg-token" type="text" placeholder="123456:ABCdef…" />
+            </div>
+            <div class="form-row">
+              <label>Chat ID</label>
+              <input id="s-tg-chat" type="text" placeholder="-100123456789" />
+            </div>
+            <button class="btn-outline" onclick="testTelegram()">
+              Tes Kirim Telegram
+            </button>
+          </section>
+
+          <section>
+            <h3>Email (SMTP)</h3>
+            <div class="form-row">
+              <label>SMTP Host</label>
+              <input
+                id="s-smtp-host"
+                type="text"
+                placeholder="smtp.gmail.com"
+              />
+            </div>
+            <div class="form-row">
+              <label>SMTP Port</label>
+              <input id="s-smtp-port" type="number" placeholder="587" />
+            </div>
+            <div class="form-row">
+              <label>Username</label>
+              <input
+                id="s-smtp-user"
+                type="text"
+                placeholder="user@gmail.com"
+              />
+            </div>
+            <div class="form-row">
+              <label>Password</label>
+              <input id="s-smtp-pass" type="password" />
+            </div>
+            <div class="form-row">
+              <label>Kirim ke (To)</label>
+              <input
+                id="s-smtp-to"
+                type="email"
+                placeholder="admin@uiii.ac.id"
+              />
+            </div>
+            <button class="btn-outline" onclick="testEmail()">
+              Tes Kirim Email
+            </button>
+          </section>
+
+          <section>
+            <h3>MeshCentral</h3>
+            <div class="form-row">
+              <label>URL MeshCentral</label>
+              <input
+                id="s-mesh-url"
+                type="url"
+                placeholder="http://192.168.1.10:4430"
+              />
+            </div>
+          </section>
+        </div>
+        <!-- modal-body -->
+        <div class="modal-ftr">
+          <button class="btn-primary" onclick="saveSettings()">
+            💾 Simpan
+          </button>
+          <button class="btn-ghost" onclick="closeSettings()">Batal</button>
+        </div>
+      </div>
     </div>
-</body>
+
+    <!-- ── Agent Logs Modal ───────────────────────────────────────────────────── -->
+    <div
+      id="modal-agent-logs"
+      class="modal-overlay"
+      onclick="closeAgentLogs(event)"
+    >
+      <div class="modal modal-wide">
+        <div class="modal-hdr">
+          <h2 id="agent-logs-title">Log Agent</h2>
+          <button class="btn-close" onclick="closeAgentLogs()">✕</button>
+        </div>
+        <div class="modal-body">
+          <pre
+            id="agent-logs-content"
+            class="log-viewer"
+            style="max-height: 500px"
+          >
+Memuat…</pre
+          >
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
 </html>

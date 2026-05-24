@@ -68,7 +68,7 @@ func main() {
 	})
 
 	api := r.Group("/api")
-	RegisterAPIRoutes(api, db, hub, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
+	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	slog.Info("Library Monitor started", "address", addr)

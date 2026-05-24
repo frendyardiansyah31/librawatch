@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, deployer *Deployer, uploadsPath string, maxUploadMB int64) {
+func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter, deployer *Deployer, uploadsPath string, maxUploadMB int64) {
 	// ── Agents ──────────────────────────────────────────────────────────
 
 	api.GET("/agents", func(c *gin.Context) {
@@ -212,6 +212,24 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, deployer *Deploye
 
 	api.GET("/file/:filename", func(c *gin.Context) {
 		c.File(uploadsPath + "/" + c.Param("filename"))
+	})
+
+	// ── Test notifications ────────────────────────────────────────────────
+
+	api.POST("/test/telegram", func(c *gin.Context) {
+		if err := alerter.SendTestTelegram(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	api.POST("/test/email", func(c *gin.Context) {
+		if err := alerter.SendTestEmail(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
 	// ── Logs ─────────────────────────────────────────────────────────────

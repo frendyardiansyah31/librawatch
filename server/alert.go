@@ -213,6 +213,64 @@ func (a *Alerter) sendEmail(message string, settings map[string]string) {
 	}
 }
 
+// SendTestTelegram sends a test message using current DB settings and returns any error.
+func (a *Alerter) SendTestTelegram() error {
+	settings, err := a.db.GetAllSettings()
+	if err != nil {
+		return err
+	}
+	token  := settings["telegram_token"]
+	chatID := settings["telegram_chat_id"]
+	if token == "" || chatID == "" {
+		return fmt.Errorf("Telegram belum dikonfigurasi (token/chat_id kosong)")
+	}
+	body, _ := json.Marshal(map[string]string{
+		"chat_id": chatID,
+		"text":    "✅ Library Monitor UIII: Tes notifikasi Telegram berhasil",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://api.telegram.org/bot"+token+"/sendMessage",
+		bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("Telegram merespons dengan status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// SendTestEmail sends a test email using current DB settings and returns any error.
+func (a *Alerter) SendTestEmail() error {
+	settings, err := a.db.GetAllSettings()
+	if err != nil {
+		return err
+	}
+	host := settings["smtp_host"]
+	to   := settings["smtp_to"]
+	user := settings["smtp_user"]
+	pass := settings["smtp_pass"]
+	port := parseIntSetting(settings["smtp_port"], 587)
+	if host == "" || to == "" || user == "" {
+		return fmt.Errorf("Email belum dikonfigurasi (smtp_host/smtp_to/smtp_user kosong)")
+	}
+	m := gomail.NewMessage()
+	m.SetHeader("From", user)
+	m.SetHeader("To", to)
+	m.SetHeader("Subject", "Library Monitor UIII — Tes Email")
+	m.SetBody("text/plain", "✅ Library Monitor UIII: Tes notifikasi email berhasil")
+	d := gomail.NewDialer(host, port, user, pass)
+	return d.DialAndSend(m)
+}
+
 func parseFloatSetting(s string, def float64) float64 {
 	var v float64
 	if _, err := fmt.Sscanf(s, "%f", &v); err != nil || v == 0 {
