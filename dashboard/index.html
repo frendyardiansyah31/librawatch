@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Library Monitor — Jusuf Kalla Library UIII</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 2rem;
+        }
+        h1 { color: #38bdf8; font-size: 1.5rem; margin-bottom: 0.5rem; }
+        .subtitle { color: #64748b; margin-bottom: 2rem; font-size: 0.9rem; }
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            max-width: 600px;
+        }
+        .card h2 { color: #94a3b8; font-size: 1rem; margin-bottom: 0.75rem; }
+        .status { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; }
+        a { color: #38bdf8; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .note { color: #64748b; font-size: 0.8rem; margin-top: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Library Monitor</h1>
+    <p class="subtitle">Jusuf Kalla Library UIII — PC Monitoring System</p>
+
+    <div class="card">
+        <h2>Server Status</h2>
+        <div class="status">
+            <div class="dot"></div>
+            <span>Server running (Milestone 1 — Foundation)</span>
+        </div>
+        <p>
+            <a href="/api/agents">GET /api/agents</a> — agent list<br>
+        </p>
+        <p class="note">Full dashboard UI akan diimplementasikan pada Milestone 5.</p>
+    </div>
+</body>
+</html>
