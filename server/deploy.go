@@ -72,12 +72,19 @@ func (d *Deployer) dispatch(agentID string, job *DeployJob) bool {
 		Payload: job.Payload,
 		Args:    job.Args,
 	}
-	if job.Type == "file_deploy" {
-		msg.Filename = job.Payload // payload is the filename for file_deploy
+	switch job.Type {
+	case "file_deploy":
+		msg.Filename = job.Payload // payload is the filename
+	case "deepfreeze":
+		msg.Action = job.Payload   // thaw / freeze / query_df
+		msg.Password = job.Args    // optional DF password
+	case "install_ssh":
+		msg.Action = "install_ssh"
+		msg.Args = job.Args // admin_ip passed via args
 	}
 	sent := d.hub.SendToAgent(agentID, msg)
 	if sent {
-		slog.Info("deploy dispatched", "job_id", job.ID, "agent_id", agentID)
+		slog.Info("deploy dispatched", "job_id", job.ID, "agent_id", agentID, "type", job.Type)
 	}
 	return sent
 }

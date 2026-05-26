@@ -12,8 +12,9 @@ const (
 	agentBaseDir  = `C:\LibraryAgent`
 	idFile        = `C:\LibraryAgent\id.txt`
 	meshIDFile    = `C:\LibraryAgent\mesh_id.txt`
+	tokenFile     = `C:\LibraryAgent\token.txt`
 	agentLogFile  = `C:\LibraryAgent\agent.log`
-	defaultServer = "ws://192.168.1.10:8080/ws"
+	defaultServer = "ws://10.5.39.86:8080/ws"
 )
 
 // getServerURL returns the WebSocket server URL.
@@ -61,6 +62,16 @@ func newUUID() string {
 // loadMeshID reads the MeshCentral device ID written by the MeshCentral agent installer.
 func loadMeshID() string {
 	data, err := os.ReadFile(meshIDFile)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// loadToken reads an optional auth token from C:\LibraryAgent\token.txt.
+// Returns empty string if the file does not exist (auth disabled).
+func loadToken() string {
+	data, err := os.ReadFile(tokenFile)
 	if err != nil {
 		return ""
 	}

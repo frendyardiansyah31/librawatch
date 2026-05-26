@@ -2,6 +2,10 @@ server:
   port: 8080
   host: "0.0.0.0"
 
+auth:
+  token: ""           # token untuk agent WebSocket (kosong = nonaktif)
+  admin_cidrs: []     # contoh: ["10.5.39.88/32"] — batasi dashboard ke IP admin saja
+
 database:
   path: "./data/library.db"
 

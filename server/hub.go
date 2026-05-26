@@ -48,6 +48,8 @@ type OutgoingMessage struct {
 	Filename string `json:"filename,omitempty"`
 	Args     string `json:"args,omitempty"`
 	Lines    int    `json:"lines,omitempty"`
+	Action   string `json:"action,omitempty"`   // deepfreeze: thaw/freeze/query_df
+	Password string `json:"password,omitempty"` // deepfreeze: optional DF password
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
@@ -122,6 +124,7 @@ type Hub struct {
 	db            *DB
 	alerter       *Alerter
 	deployer      *Deployer
+	authToken     string   // if non-empty, WebSocket clients must provide ?token=
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
 	logWaiters    sync.Map // agentID → chan string, pending log relay
 }
@@ -209,7 +212,7 @@ func (h *Hub) handleMessage(c *Client, data []byte) {
 	switch msg.Type {
 	case "metrics":
 		h.handleMetrics(c, &msg)
-	case "exec_result":
+	case "exec_result", "deepfreeze_result":
 		h.handleExecResult(&msg)
 	case "log_result":
 		h.handleLogResult(c, &msg)
@@ -296,7 +299,8 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 		slog.Error("update deploy result failed", "job_id", msg.JobID, "error", err)
 		return
 	}
-	slog.Info("exec result received",
+	slog.Info("result received",
+		"type", msg.Type,
 		"job_id", msg.JobID,
 		"agent_id", msg.AgentID,
 		"status", msg.Status)
@@ -350,6 +354,15 @@ func (h *Hub) RequestAgentLogs(agentID string, lines int) (string, error) {
 // ─── WebSocket Endpoint ────────────────────────────────────────────────────
 
 func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	if hub.authToken != "" {
+		token := r.URL.Query().Get("token")
+		if token != hub.authToken {
+			slog.Warn("ws auth rejected", "remote_addr", r.RemoteAddr)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("ws upgrade failed", "error", err)

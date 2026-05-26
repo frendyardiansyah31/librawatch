@@ -113,6 +113,8 @@ async function loadAgents() {
     renderAgents(allAgents);
   } catch (e) {
     console.error('loadAgents:', e);
+    const tbody = document.getElementById('agents-tbody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -318,6 +320,55 @@ async function submitDeploy(mode) {
   }
 }
 
+async function submitDeepFreeze() {
+  const targets = Array.from(deployTargets);
+  if (!targets.length) { alert('Pilih minimal satu PC terlebih dahulu.'); return; }
+
+  const action   = document.getElementById('df-action').value;
+  const password = document.getElementById('df-password').value.trim();
+
+  if (action === 'thaw' || action === 'freeze') {
+    const label = action === 'thaw' ? 'THAW (cair)' : 'FREEZE (beku)';
+    if (!confirm(`Yakin ingin ${label} ${targets.length} PC?\nPC akan restart segera.`)) return;
+  }
+
+  try {
+    const job = await api('POST', '/deploy', {
+      type: 'deepfreeze',
+      payload: action,
+      args: password,
+      targets,
+    });
+    loadDeployHistory();
+    startJobPoller(job.id);
+  } catch (e) {
+    alert('Gagal: ' + e.message);
+  }
+}
+
+async function submitInstallSSH() {
+  const targets = Array.from(deployTargets);
+  if (!targets.length) { alert('Pilih minimal satu PC terlebih dahulu.'); return; }
+
+  const adminIP = document.getElementById('ssh-admin-ip').value.trim();
+  const ipNote  = adminIP ? ` (SSH dibatasi ke ${adminIP})` : ' (SSH terbuka untuk semua IP)';
+
+  if (!confirm(`Install OpenSSH Server ke ${targets.length} PC?${ipNote}`)) return;
+
+  try {
+    const job = await api('POST', '/deploy', {
+      type: 'install_ssh',
+      payload: 'install_ssh',
+      args: adminIP,
+      targets,
+    });
+    loadDeployHistory();
+    startJobPoller(job.id);
+  } catch (e) {
+    alert('Gagal: ' + e.message);
+  }
+}
+
 async function uploadFile() {
   const input  = document.getElementById('file-input');
   const status = document.getElementById('upload-status');
@@ -354,6 +405,10 @@ function renderDeployHistory(jobs) {
   }
   el.innerHTML = jobs.slice(0, 30).map(j => {
     const shortPayload = j.payload.length > 70 ? j.payload.slice(0, 70) + '…' : j.payload;
+    const canCancel = j.status === 'pending' || j.status === 'dispatched';
+    const cancelBtn = canCancel
+      ? `<button class="btn-sm btn-danger" onclick="cancelDeployJob('${esc(j.id)}',event)" title="Batalkan job ini">✕ Batalkan</button>`
+      : '';
     return `
       <div class="job-card">
         <div class="job-card-hdr" onclick="toggleJobCard('${esc(j.id)}')">
@@ -361,6 +416,7 @@ function renderDeployHistory(jobs) {
           <span class="job-payload" title="${esc(j.payload)}">${esc(shortPayload)}</span>
           <span class="badge badge-${j.status}">${j.status}</span>
           <span style="color:var(--muted);flex-shrink:0">${timeSince(j.created_at)}</span>
+          ${cancelBtn}
         </div>
         <div id="jresults-${esc(j.id)}" class="job-results"></div>
       </div>`;
@@ -372,6 +428,17 @@ function toggleJobCard(id) {
   if (!el) return;
   const isOpen = el.classList.toggle('open');
   if (isOpen && !el.innerHTML.trim()) loadJobResults(id);
+}
+
+async function cancelDeployJob(id, event) {
+  event.stopPropagation();
+  if (!confirm('Batalkan job ini? Semua target yang masih pending akan dibatalkan.')) return;
+  try {
+    await api('DELETE', '/deploy/' + id);
+    await loadDeployHistory();
+  } catch (e) {
+    alert('Gagal batalkan job: ' + e.message);
+  }
 }
 
 async function loadJobResults(id) {
@@ -437,11 +504,9 @@ async function loadLogs() {
   const el = document.getElementById('logs-content');
   try {
     const data = await api('GET', '/logs?lines=100');
-    el.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    el.textContent = data.lines || '(log kosong)';
   } catch (e) {
-    el.textContent = e.message.includes('Milestone') || e.message.includes('available')
-      ? 'Log server akan tersedia pada Milestone 6.\n\nEndpoint: GET /api/logs?lines=100'
-      : 'Error: ' + e.message;
+    el.textContent = 'Error: ' + e.message;
   }
 }
 
@@ -526,11 +591,9 @@ async function openAgentLogs(id, hostname) {
   el.textContent = 'Memuat…';
   try {
     const data = await api('GET', '/agents/' + id + '/logs');
-    el.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    el.textContent = data.lines || '(log kosong)';
   } catch (e) {
-    el.textContent = e.message.includes('Milestone') || e.message.includes('available')
-      ? `Log agent akan tersedia pada Milestone 6.\n\nEndpoint: GET /api/agents/${id}/logs`
-      : 'Error: ' + e.message;
+    el.textContent = 'Error: ' + e.message;
   }
 }
 

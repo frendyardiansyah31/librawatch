@@ -141,6 +141,8 @@ main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
 }
 .btn-sm:hover  { border-color: var(--blue); color: var(--blue); }
 .btn-sm:disabled { opacity: .5; cursor: default; }
+.btn-danger { border-color: var(--red) !important; color: var(--red) !important; }
+.btn-danger:hover { background: var(--red) !important; color: #fff !important; }
 
 .btn-close { background: none; border: none; font-size: 18px; color: var(--muted); padding: 4px; line-height: 1; }
 .btn-close:hover { color: var(--text); }

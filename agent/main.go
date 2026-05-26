@@ -102,9 +102,20 @@ func main() {
 	}
 
 	serverURL := getServerURL()
+	// Derive base HTTP URL before appending token query param
 	serverBaseURL = strings.Replace(serverURL, "ws://", "http://", 1)
 	serverBaseURL = strings.Replace(serverBaseURL, "wss://", "https://", 1)
 	serverBaseURL = strings.TrimSuffix(serverBaseURL, "/ws")
+
+	if token := loadToken(); token != "" {
+		if strings.Contains(serverURL, "?") {
+			serverURL = serverURL + "&token=" + token
+		} else {
+			serverURL = serverURL + "?token=" + token
+		}
+		logMsg("INFO", "Auth token loaded from token.txt")
+	}
+
 	logMsg("INFO", "Agent started, ID: %s, Server: %s, Hostname: %s", agentID, serverURL, hostname)
 
 	connectLoop(agentID, serverURL)
@@ -112,11 +123,15 @@ func main() {
 
 func initLogger() {
 	_ = os.MkdirAll(agentBaseDir, 0755)
-	logOut := io.Writer(os.Stdout)
-	if rw, err := newRotWriter(agentLogFile, 5, 1); err == nil {
-		logOut = io.MultiWriter(os.Stdout, rw)
+	// Agent runs as windowsgui (no console). Writing to os.Stdout fails silently
+	// under Task Scheduler SYSTEM, which causes io.MultiWriter to skip the file
+	// writer. Log to file only.
+	rw, err := newRotWriter(agentLogFile, 5, 1)
+	if err != nil {
+		agentLogger = log.New(io.Discard, "", 0)
+		return
 	}
-	agentLogger = log.New(logOut, "", 0)
+	agentLogger = log.New(rw, "", 0)
 }
 
 func logMsg(level, format string, args ...interface{}) {
@@ -222,18 +237,44 @@ func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
 		go deployFile(conn, agentID, msg)
 	case "get_logs":
 		go sendLogLines(conn, agentID, msg)
+	case "deepfreeze":
+		go handleDeepFreeze(conn, agentID, msg)
+	case "install_ssh":
+		go handleInstallSSH(conn, agentID, msg)
 	}
 }
 
 func getLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
+	// UDP dial: no packet sent, but OS resolves the routing table and returns
+	// the local address that would be used for outbound traffic (default route).
+	// This correctly handles multiple NICs, Ethernet 1/2/3, WiFi, etc.
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err == nil {
+		defer conn.Close()
+		if ip := conn.LocalAddr().(*net.UDPAddr).IP.String(); ip != "" {
+			return ip
+		}
+	}
+
+	// Fallback: scan interfaces, skip loopback and link-local (169.254.x.x)
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "unknown"
 	}
-	for _, addr := range addrs {
-		ipnet, ok := addr.(*net.IPNet)
-		if ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
-			return ipnet.IP.String()
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipnet.IP.To4()
+			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+				return ip.String()
+			}
 		}
 	}
 	return "unknown"

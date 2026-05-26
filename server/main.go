@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +69,46 @@ func (w *rotWriter) rotate() {
 	_ = w.open()
 }
 
+var serverStart = time.Now()
+
+// adminIPWhitelist returns a Gin middleware that allows only requests from
+// the given CIDR ranges. Intended for dashboard and API routes only.
+func adminIPWhitelist(cidrs []string) gin.HandlerFunc {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		// Accept plain IPs without prefix length (treat as /32 or /128)
+		if !strings.Contains(cidr, "/") {
+			cidr += "/32"
+		}
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			slog.Warn("admin_cidrs: invalid CIDR, skipping", "cidr", cidr, "error", err)
+			continue
+		}
+		nets = append(nets, ipnet)
+	}
+	return func(c *gin.Context) {
+		if len(nets) == 0 {
+			c.Next()
+			return
+		}
+		ip := net.ParseIP(c.ClientIP())
+		if ip == nil {
+			slog.Warn("admin whitelist: cannot parse client IP", "raw", c.ClientIP())
+			c.AbortWithStatus(403)
+			return
+		}
+		for _, n := range nets {
+			if n.Contains(ip) {
+				c.Next()
+				return
+			}
+		}
+		slog.Warn("admin whitelist: access denied", "ip", ip)
+		c.AbortWithStatus(403)
+	}
+}
+
 func main() {
 	if err := os.MkdirAll("./logs", 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "logs dir creation failed: %v\n", err)
@@ -101,6 +143,10 @@ func main() {
 	}
 
 	hub := NewHub(db)
+	hub.authToken = cfg.Auth.Token
+	if hub.authToken != "" {
+		slog.Info("WebSocket auth enabled")
+	}
 
 	alerter := NewAlerter(db)
 	hub.alerter = alerter
@@ -124,16 +170,26 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	r.GET("/", func(c *gin.Context) {
-		c.File("./dashboard/index.html")
-	})
-	r.Static("/static", "./dashboard")
-
+	// /ws is NOT behind the admin whitelist — agents from all 60 PCs must connect
 	r.GET("/ws", func(c *gin.Context) {
 		ServeWS(hub, c.Writer, c.Request)
 	})
 
-	api := r.Group("/api")
+	// Dashboard and API are behind the admin IP whitelist (if configured)
+	var adminMiddleware gin.HandlerFunc
+	if len(cfg.Auth.AdminCIDRs) > 0 {
+		adminMiddleware = adminIPWhitelist(cfg.Auth.AdminCIDRs)
+		slog.Info("admin IP whitelist enabled", "cidrs", cfg.Auth.AdminCIDRs)
+	} else {
+		adminMiddleware = func(c *gin.Context) { c.Next() }
+	}
+
+	r.GET("/", adminMiddleware, func(c *gin.Context) {
+		c.File("./dashboard/index.html")
+	})
+	r.Static("/static", "./dashboard")
+
+	api := r.Group("/api", adminMiddleware)
 	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

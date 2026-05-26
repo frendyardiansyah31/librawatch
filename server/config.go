@@ -13,6 +13,11 @@ type Config struct {
 		Host string `yaml:"host"`
 	} `yaml:"server"`
 
+	Auth struct {
+		Token      string   `yaml:"token"`       // WebSocket token for agents (empty = disabled)
+		AdminCIDRs []string `yaml:"admin_cidrs"` // IP ranges allowed to access dashboard/API (empty = all)
+	} `yaml:"auth"`
+
 	Database struct {
 		Path string `yaml:"path"`
 	} `yaml:"database"`
@@ -50,6 +55,10 @@ type Config struct {
 const defaultConfigYAML = `server:
   port: 8080
   host: "0.0.0.0"
+
+auth:
+  token: ""         # token untuk agent WebSocket (kosong = nonaktif)
+  admin_cidrs: []   # batasi akses dashboard/API ke IP tertentu, contoh: ["10.5.39.88/32"]
 
 database:
   path: "./data/library.db"

@@ -121,6 +121,9 @@ func initDB(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+	// SQLite allows only one writer at a time. A single connection serializes
+	// all access and ensures busy_timeout pragma applies to every operation.
+	raw.SetMaxOpenConns(1)
 
 	db := &DB{raw}
 	if err := db.configure(); err != nil {
@@ -246,20 +249,10 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 	rows, err := db.Query(`
 		SELECT
 			a.id, a.hostname, a.ip, a.os, a.last_seen, a.mesh_id, a.status, a.created_at,
-			COALESCE(lm.cpu, 0.0),
-			COALESCE(lm.ram, 0.0),
-			COALESCE(tp.name, '')
+			COALESCE((SELECT cpu  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
+			COALESCE((SELECT ram  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
+			COALESCE((SELECT name FROM processes WHERE agent_id = a.id ORDER BY recorded_at DESC, cpu DESC LIMIT 1), '')
 		FROM agents a
-		LEFT JOIN (
-			SELECT agent_id, cpu, ram,
-			       ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY recorded_at DESC) AS rn
-			FROM metrics
-		) lm ON a.id = lm.agent_id AND lm.rn = 1
-		LEFT JOIN (
-			SELECT agent_id, name,
-			       ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY recorded_at DESC, cpu DESC) AS rn
-			FROM processes
-		) tp ON a.id = tp.agent_id AND tp.rn = 1
 		ORDER BY a.hostname ASC
 	`)
 	if err != nil {
@@ -560,6 +553,18 @@ func (db *DB) GetDeployJobByID(id string) (*DeployJob, error) {
 
 func (db *DB) UpdateDeployJobStatus(id, status string) error {
 	_, err := db.Exec(`UPDATE deploy_jobs SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
+func (db *DB) CancelDeployJob(id string) error {
+	_, err := db.Exec(`UPDATE deploy_jobs SET status = 'cancelled' WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`
+		UPDATE deploy_results SET status = 'cancelled', output = 'Job dibatalkan oleh admin'
+		WHERE job_id = ? AND status = 'pending'
+	`, id)
 	return err
 }
 

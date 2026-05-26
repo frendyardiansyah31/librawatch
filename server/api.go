@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -127,6 +129,16 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
+	// ── Health ───────────────────────────────────────────────────────────
+
+	api.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"ok":           true,
+			"uptime":       time.Since(serverStart).Round(time.Second).String(),
+			"agents_online": hub.OnlineCount(),
+		})
+	})
+
 	// ── Stats ────────────────────────────────────────────────────────────
 
 	api.GET("/stats", func(c *gin.Context) {
@@ -150,10 +162,23 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if req.Type == "" || req.Payload == "" || len(req.Targets) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "type, payload, and targets are required"})
+		if req.Type == "" || len(req.Targets) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "type and targets are required"})
 			return
 		}
+		if req.Type != "install_ssh" && req.Payload == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "payload is required for type " + req.Type})
+			return
+		}
+		payloadPreview := req.Payload
+		if len(payloadPreview) > 80 {
+			payloadPreview = payloadPreview[:80] + "…"
+		}
+		slog.Info("deploy request",
+			"source_ip", c.ClientIP(),
+			"type", req.Type,
+			"payload", payloadPreview,
+			"targets", len(req.Targets))
 		job, err := deployer.CreateJob(req.Type, req.Payload, req.Args, req.Targets)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -169,6 +194,15 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			return
 		}
 		c.JSON(http.StatusOK, jobs)
+	})
+
+	api.DELETE("/deploy/:id", func(c *gin.Context) {
+		if err := db.CancelDeployJob(c.Param("id")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		slog.Info("deploy job cancelled", "job_id", c.Param("id"), "source_ip", c.ClientIP())
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
 	api.GET("/deploy/:id", func(c *gin.Context) {

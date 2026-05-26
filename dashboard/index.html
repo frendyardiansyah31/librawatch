@@ -120,6 +120,20 @@
               >
                 File Deploy
               </button>
+              <button
+                class="inner-tab"
+                data-dtab="deepfreeze"
+                onclick="showDTab('deepfreeze')"
+              >
+                ❄ Deep Freeze
+              </button>
+              <button
+                class="inner-tab"
+                data-dtab="ssh"
+                onclick="showDTab('ssh')"
+              >
+                🔑 Install SSH
+              </button>
             </div>
 
             <div id="dtab-ps" class="deploy-tab active">
@@ -181,6 +195,38 @@
                 disabled
               >
                 ▶ Deploy File
+              </button>
+            </div>
+
+            <div id="dtab-deepfreeze" class="deploy-tab">
+              <label>Aksi Deep Freeze:</label>
+              <select id="df-action">
+                <option value="query_df">🔍 Cek Status Deep Freeze</option>
+                <option value="thaw">❄→🌡 Thaw — PC restart dalam kondisi cair</option>
+                <option value="freeze">🌡→❄ Freeze — PC restart dalam kondisi beku</option>
+              </select>
+              <label>Password Deep Freeze (kosongkan jika tidak ada):</label>
+              <input id="df-password" type="password" placeholder="Password Deep Freeze…" />
+              <p style="font-size:12px;color:var(--muted);margin:4px 0 8px">
+                Thaw/Freeze akan me-restart PC target. Pilih PC yang tidak sedang dipakai.
+              </p>
+              <button class="btn-primary" onclick="submitDeepFreeze()">
+                ▶ Jalankan
+              </button>
+            </div>
+
+            <div id="dtab-ssh" class="deploy-tab">
+              <p style="font-size:13px;color:var(--muted);margin:0 0 10px">
+                Install OpenSSH Server di PC target agar Ansible bisa masuk via SSH.
+              </p>
+              <label>IP Admin / Ansible Server (opsional, untuk restrict firewall):</label>
+              <input id="ssh-admin-ip" type="text" placeholder="contoh: 10.5.39.86" />
+              <p style="font-size:12px;color:var(--muted);margin:4px 0 8px">
+                Jika diisi, firewall SSH hanya mengizinkan koneksi dari IP ini.
+                Kosongkan untuk izinkan semua IP.
+              </p>
+              <button class="btn-primary" onclick="submitInstallSSH()">
+                ▶ Install OpenSSH
               </button>
             </div>
           </div>
