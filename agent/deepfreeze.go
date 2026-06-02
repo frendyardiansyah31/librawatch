@@ -11,13 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Common DFCmd.exe paths for Deep Freeze 8 (32-bit and 64-bit installations)
-var dfcmdCandidates = []string{
-	`C:\Program Files\Faronics\Deep Freeze 8\DFCmd.exe`,
-	`C:\Program Files (x86)\Faronics\Deep Freeze 8\DFCmd.exe`,
-	`C:\Program Files\Faronics\Deep Freeze\DFCmd.exe`,
-	`C:\Program Files (x86)\Faronics\Deep Freeze\DFCmd.exe`,
-}
+const dfcPath = `C:\Windows\SysWOW64\DFC.exe`
 
 func handleDeepFreeze(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
 	action, _ := msg["action"].(string)
@@ -35,73 +29,109 @@ func handleDeepFreeze(conn *websocket.Conn, agentID string, msg map[string]inter
 			"output":   output,
 		})
 		if err := conn.WriteMessage(websocket.TextMessage, resp); err != nil {
-			logMsg("ERROR", "DeepFreeze send result: %v", err)
+			logMsg("ERROR", "DeepFreeze: send result failed: %v", err)
 		}
 	}
 
-	dfcmd := findDFCmd()
-	if dfcmd == "" {
-		logMsg("WARN", "DeepFreeze: DFCmd.exe not found in any of %v", dfcmdCandidates)
-		send("error", "DFCmd.exe tidak ditemukan. Pastikan Deep Freeze 8 terinstall.")
+	if _, err := os.Stat(dfcPath); err != nil {
+		logMsg("ERROR", "DeepFreeze: DFC.exe tidak ditemukan di %s: %v", dfcPath, err)
+		send("error", fmt.Sprintf("DFC.exe tidak ditemukan di %s", dfcPath))
 		return
 	}
-	logMsg("INFO", "DeepFreeze: using %s", dfcmd)
+	logMsg("INFO", "DeepFreeze: DFC.exe ditemukan di %s", dfcPath)
 
-	var arg string
 	switch action {
 	case "thaw":
-		if password != "" {
-			arg = fmt.Sprintf("/BOOTTHAWED:%s", password)
-		} else {
-			arg = "/BOOTTHAWED"
+		if password == "" {
+			logMsg("WARN", "DeepFreeze: password kosong untuk action thaw")
+			send("error", "Password Deep Freeze harus diisi untuk thaw")
+			return
 		}
+		runDFCmd(password, "/BOOTTHAWED", action, send)
+
 	case "freeze":
-		if password != "" {
-			arg = fmt.Sprintf("/BOOTFROZEN:%s", password)
-		} else {
-			arg = "/BOOTFROZEN"
+		if password == "" {
+			logMsg("WARN", "DeepFreeze: password kosong untuk action freeze")
+			send("error", "Password Deep Freeze harus diisi untuk freeze")
+			return
 		}
+		runDFCmd(password, "/BOOTFROZEN", action, send)
+
 	case "query_df":
-		if password != "" {
-			arg = fmt.Sprintf("/QUERY:%s", password)
-		} else {
-			arg = "/QUERY"
+		output, err := queryIsFrozen()
+		if err != nil {
+			logMsg("ERROR", "DeepFreeze: query_df gagal: %v | output=%q", err, output)
+			send("error", output)
+			return
 		}
+		logMsg("INFO", "DeepFreeze: query_df result=%q", output)
+		send("ok", output)
+
 	default:
-		logMsg("WARN", "DeepFreeze: unknown action %q", action)
+		logMsg("WARN", "DeepFreeze: action tidak dikenal: %q", action)
 		send("error", fmt.Sprintf("action tidak dikenal: %s", action))
-		return
+	}
+}
+
+// runDFCmd menjalankan DFC.exe <password> <flag>, lalu verifikasi status via ISFROZEN.
+func runDFCmd(password, flag, action string, send func(string, string)) {
+	// DFC.exe requires the password as the first positional argument:
+	// DFC "Library2025!" /BOOTTHAWED   →  thaw on next reboot
+	// DFC "Library2025!" /BOOTFROZEN   →  freeze on next reboot
+	logMsg("INFO", "DeepFreeze: exec DFC.exe [password] %s", flag)
+
+	cmd := exec.Command(dfcPath, password, flag)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	cmdOutput := strings.TrimSpace(string(out))
+
+	logMsg("INFO", "DeepFreeze: DFC.exe %s exit=%v output=%q", flag, err, cmdOutput)
+
+	// DFC.exe often exits non-zero for thaw/freeze because it schedules a reboot.
+	// We treat any non-zero exit as a warning, not a hard failure — then verify.
+	if err != nil {
+		logMsg("WARN", "DeepFreeze: DFC.exe exited non-zero (%v) — mungkin normal, verifikasi status", err)
 	}
 
-	logMsg("INFO", "DeepFreeze: exec DFCmd.exe %s", arg)
+	// Verify the new state via ISFROZEN so the operator can confirm the change.
+	verifyOut, verifyErr := queryIsFrozen()
+	if verifyErr != nil {
+		logMsg("ERROR", "DeepFreeze: verifikasi ISFROZEN gagal setelah %s: %v | output=%q", action, verifyErr, verifyOut)
+	} else {
+		logMsg("INFO", "DeepFreeze: verifikasi setelah %s — ISFROZEN=%q", action, verifyOut)
+	}
 
-	cmd := exec.Command(dfcmd, arg)
+	var sb strings.Builder
+	if cmdOutput != "" {
+		sb.WriteString(cmdOutput)
+		sb.WriteString("\n")
+	}
+	sb.WriteString(fmt.Sprintf("Verifikasi ISFROZEN: %s", verifyOut))
+	sb.WriteString("\n(PC akan restart segera untuk menerapkan perubahan)")
+
+	send("ok", sb.String())
+}
+
+// queryIsFrozen runs DFC.exe get /ISFROZEN and returns the trimmed output.
+// Returns (output, error); on exec error the output contains the combined stderr+stdout.
+func queryIsFrozen() (string, error) {
+	logMsg("INFO", "DeepFreeze: exec DFC.exe get /ISFROZEN")
+
+	cmd := exec.Command(dfcPath, "get", "/ISFROZEN")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 
+	logMsg("INFO", "DeepFreeze: ISFROZEN exit=%v output=%q", err, output)
+
 	if err != nil {
-		// thaw/freeze trigger a reboot — DFCmd.exe exits non-zero but the command still works.
-		// Only query_df should treat a non-zero exit as a real error.
-		logMsg("WARN", "DeepFreeze: DFCmd.exe exit=%v output=%q", err, output)
-		if action == "thaw" || action == "freeze" {
-			logMsg("INFO", "DeepFreeze: %s delivered, PC will reboot shortly", action)
-			send("ok", fmt.Sprintf("%s\n(PC akan restart segera)", output))
+		msg := output
+		if msg == "" {
+			msg = err.Error()
 		} else {
-			send("error", fmt.Sprintf("%s\n(exit: %v)", output, err))
+			msg = fmt.Sprintf("%s (exit: %v)", msg, err)
 		}
-		return
+		return msg, err
 	}
-
-	logMsg("INFO", "DeepFreeze: done action=%s output=%q", action, output)
-	send("ok", output)
-}
-
-func findDFCmd() string {
-	for _, p := range dfcmdCandidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
+	return output, nil
 }

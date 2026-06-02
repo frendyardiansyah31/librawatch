@@ -28,9 +28,10 @@ go build -ldflags="-s -w" -o ..\library-server.exe .
 ### 1.2 Build Agent (untuk 60 PC Windows 11)
 
 ```powershell
-cd C:\Development\go-rmm\agent
-go build -ldflags="-H windowsgui -s -w" -o ..\deploy\agent.exe .
+cd C:\Development\go-rmm
+go build -ldflags="-H windowsgui -s -w" -o deploy\agent.exe .\agent\
 # -H windowsgui = tidak muncul console/window di PC user
+# Output langsung ke folder deploy\ agar siap di-push
 ```
 
 ### 1.3 Hasil Build
@@ -283,13 +284,98 @@ Invoke-Command -ComputerName 192.168.1.10 -ScriptBlock {
 
 ```powershell
 # 1. Build ulang
-cd C:\Development\go-rmm\agent
-go build -ldflags="-H windowsgui -s -w" -o ..\deploy\agent.exe .
+cd C:\Development\go-rmm
+go build -ldflags="-H windowsgui -s -w" -o deploy\agent.exe .\agent\
 
 # 2. Jalankan push_all.ps1 lagi — script overwrite agent lama dan restart otomatis
-cd ..\deploy
+cd deploy
 .\push_all.ps1 -User "Administrator" -Pass "passwordPC"
 ```
+
+---
+
+## Bagian 6 — Deep Freeze
+
+Fitur Deep Freeze memungkinkan thaw/freeze PC dari dashboard tanpa perlu akses fisik.
+Agent memanggil `DFC.exe` yang sudah terinstall di tiap PC client.
+
+### 6.1 Prasyarat di Tiap PC Client
+
+Deep Freeze Standard/Enterprise **harus sudah terinstall** di PC. Setelah install, pastikan file ini ada:
+
+```
+C:\Windows\SysWOW64\DFC.exe
+```
+
+> Verifikasi dari PowerShell di PC target:
+> ```powershell
+> Test-Path "C:\Windows\SysWOW64\DFC.exe"
+> # Harus return: True
+> ```
+
+### 6.2 Password Deep Freeze
+
+Password yang dipakai di lingkungan ini:
+
+```
+Library2025!
+```
+
+Password ini diisi di field **Password** pada tab Deep Freeze di dashboard, lalu dikirim ke agent saat menjalankan perintah.
+
+### 6.3 Cara Pakai dari Dashboard
+
+1. Buka dashboard: `http://192.168.1.10:8080`
+2. Pilih satu atau beberapa PC (checkbox di tabel)
+3. Klik tab **Deploy** → subtab **❄ Deep Freeze**
+4. Pilih aksi:
+   - `🔍 Cek Status Deep Freeze` — query ISFROZEN, tidak restart
+   - `🌡 Thaw (Cairkan)` — PC akan restart, disk tidak diproteksi
+   - `❄ Freeze (Bekukan)` — PC akan restart, disk kembali diproteksi
+5. Isi field **Password**: `Library2025!`
+6. Klik **▶ Jalankan**
+
+### 6.4 Perintah DFC.exe yang Dijalankan Agent
+
+| Aksi dashboard | Perintah di PC client |
+|---|---|
+| Thaw | `DFC.exe "Library2025!" /BOOTTHAWED` |
+| Freeze | `DFC.exe "Library2025!" /BOOTFROZEN` |
+| Cek status | `DFC.exe get /ISFROZEN` |
+
+Setelah thaw/freeze, agent otomatis jalankan `get /ISFROZEN` sebagai verifikasi dan catat hasilnya di `C:\LibraryAgent\agent.log`.
+
+### 6.5 Debug / Lihat Log
+
+Buka log agent di PC yang dituju dari dashboard:
+
+1. Klik ikon **log** di baris PC → tampil 50 baris terakhir `agent.log`
+2. Cari baris dengan kata `DeepFreeze` untuk trace lengkap:
+   ```
+   2026-06-02 10:00:01 [INFO] DeepFreeze: action=thaw job_id=abc123
+   2026-06-02 10:00:01 [INFO] DeepFreeze: DFC.exe ditemukan di C:\Windows\SysWOW64\DFC.exe
+   2026-06-02 10:00:01 [INFO] DeepFreeze: exec DFC.exe [password] /BOOTTHAWED
+   2026-06-02 10:00:02 [INFO] DeepFreeze: DFC.exe /BOOTTHAWED exit=<nil> output=""
+   2026-06-02 10:00:02 [INFO] DeepFreeze: exec DFC.exe get /ISFROZEN
+   2026-06-02 10:00:02 [INFO] DeepFreeze: ISFROZEN exit=<nil> output="0"
+   2026-06-02 10:00:02 [INFO] DeepFreeze: verifikasi setelah thaw — ISFROZEN="0"
+   ```
+
+**Arti output ISFROZEN:**
+
+| Output | Arti |
+|--------|------|
+| `0` | Thawed (cair) — disk tidak diproteksi |
+| `1` | Frozen (beku) — disk diproteksi Deep Freeze |
+
+### 6.6 Troubleshooting
+
+| Gejala | Kemungkinan penyebab | Solusi |
+|--------|----------------------|--------|
+| `DFC.exe tidak ditemukan di C:\Windows\SysWOW64\DFC.exe` | Deep Freeze belum install | Install Deep Freeze di PC tersebut |
+| `Password Deep Freeze harus diisi` | Field password kosong di dashboard | Isi dengan `Library2025!` |
+| PC tidak restart setelah thaw/freeze | DFC.exe exit non-zero | Cek log agent, coba run manual di PC |
+| Status selalu `Frozen` setelah thaw | Password salah | Pastikan password sesuai yang diset saat install DF |
 
 ---
 
