@@ -5,7 +5,7 @@
 setlocal
 set AGENT_DIR=C:\LibraryAgent
 set AGENT_EXE=%AGENT_DIR%\agent.exe
-set TASK_NAME=LibraryAgent
+set SERVICE_NAME=LibraryAgent
 
 :: Require Administrator
 net session >nul 2>&1
@@ -31,21 +31,33 @@ if exist "%~dp0server.txt" (
     copy /Y "%~dp0server.txt" "%AGENT_DIR%\server.txt" >nul
 )
 
-:: Remove existing scheduled task
-schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1
+:: Copy auth token if present
+if exist "%~dp0token.txt" (
+    copy /Y "%~dp0token.txt" "%AGENT_DIR%\token.txt" >nul
+)
 
-:: Create task: run as SYSTEM at startup, highest privileges
-schtasks /Create /TN "%TASK_NAME%" /TR "\"%AGENT_EXE%\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul
+:: Stop and remove any existing service or old scheduled task
+sc stop "%SERVICE_NAME%" >nul 2>&1
+"%AGENT_EXE%" uninstall >nul 2>&1
+schtasks /Delete /TN "%SERVICE_NAME%" /F >nul 2>&1
+
+:: Install as Windows Service (auto-start, restart on failure)
+"%AGENT_EXE%" install
 if %errorlevel% neq 0 (
-    echo ERROR: Could not create scheduled task.
+    echo ERROR: Could not install Windows Service.
     pause
     exit /b 1
 )
 
-:: Start immediately
-schtasks /Run /TN "%TASK_NAME%" >nul
+:: Start the service immediately
+net start "%SERVICE_NAME%"
+if %errorlevel% neq 0 (
+    echo WARNING: Service installed but could not be started right now.
+    echo It will start automatically on next boot.
+)
 
-echo Agent installed and started.
+echo.
+echo Agent installed as Windows Service.
 echo Directory : %AGENT_DIR%
-echo Task      : %TASK_NAME% (SYSTEM, run at startup)
+echo Service   : %SERVICE_NAME% (auto-start, restart on failure)
 endlocal

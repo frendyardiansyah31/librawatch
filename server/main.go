@@ -1,18 +1,25 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/kardianos/service"
 )
+
+// ── Log rotation ───────────────────────────────────────────────────────────
 
 type rotWriter struct {
 	mu      sync.Mutex
@@ -71,12 +78,45 @@ func (w *rotWriter) rotate() {
 
 var serverStart = time.Now()
 
-// adminIPWhitelist returns a Gin middleware that allows only requests from
-// the given CIDR ranges. Intended for dashboard and API routes only.
+// ── Service definition ─────────────────────────────────────────────────────
+
+var svcConfig = &service.Config{
+	Name:        "LibraryMonitor",
+	DisplayName: "Library Monitor Server",
+	Description: "UIII Library Monitor — server monitoring untuk 60 PC perpustakaan",
+	Option: service.KeyValue{
+		"StartType":              "automatic",
+		"OnFailure":              "restart",
+		"OnFailureDelayDuration": "5s",
+		"OnFailureResetPeriod":   60,
+	},
+}
+
+type serverProgram struct {
+	srv *http.Server
+}
+
+func (p *serverProgram) Start(_ service.Service) error {
+	go func() {
+		if err := p.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+		}
+	}()
+	return nil
+}
+
+func (p *serverProgram) Stop(_ service.Service) error {
+	slog.Info("Service stop requested, shutting down…")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return p.srv.Shutdown(ctx)
+}
+
+// ── Admin IP whitelist middleware ──────────────────────────────────────────
+
 func adminIPWhitelist(cidrs []string) gin.HandlerFunc {
 	nets := make([]*net.IPNet, 0, len(cidrs))
 	for _, cidr := range cidrs {
-		// Accept plain IPs without prefix length (treat as /32 or /128)
 		if !strings.Contains(cidr, "/") {
 			cidr += "/32"
 		}
@@ -109,7 +149,32 @@ func adminIPWhitelist(cidrs []string) gin.HandlerFunc {
 	}
 }
 
+// ── Entry point ────────────────────────────────────────────────────────────
+
 func main() {
+	// When running as a Windows Service the working directory is typically
+	// C:\Windows\System32. Change to the executable's directory so all
+	// relative paths in config.yaml (data/, logs/, dashboard/) work correctly.
+	if exePath, err := os.Executable(); err == nil {
+		_ = os.Chdir(filepath.Dir(exePath))
+	}
+
+	// Handle service control commands first — skip expensive startup.
+	if len(os.Args) > 1 {
+		prg := &serverProgram{}
+		svc, err := service.New(prg, svcConfig)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "service create: %v\n", err)
+			os.Exit(1)
+		}
+		if err := service.Control(svc, os.Args[1]); err != nil {
+			fmt.Fprintf(os.Stderr, "service %s: %v\n", os.Args[1], err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// ── Logging setup ──────────────────────────────────────────────────────
 	if err := os.MkdirAll("./logs", 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "logs dir creation failed: %v\n", err)
 	}
@@ -119,6 +184,7 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(logOut, nil)))
 
+	// ── Config & DB ────────────────────────────────────────────────────────
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
@@ -142,6 +208,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ── Hub / Alerter / Deployer ───────────────────────────────────────────
 	hub := NewHub(db)
 	hub.authToken = cfg.Auth.Token
 	if hub.authToken != "" {
@@ -155,7 +222,6 @@ func main() {
 	deployer := NewDeployer(db, hub)
 	hub.deployer = deployer
 
-	// Purge metrics older than 24h every hour
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
@@ -166,16 +232,16 @@ func main() {
 		}
 	}()
 
+	// ── Router ─────────────────────────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	// /ws is NOT behind the admin whitelist — agents from all 60 PCs must connect
+	// /ws is NOT behind the admin whitelist — all 60 agent PCs must connect.
 	r.GET("/ws", func(c *gin.Context) {
 		ServeWS(hub, c.Writer, c.Request)
 	})
 
-	// Dashboard and API are behind the admin IP whitelist (if configured)
 	var adminMiddleware gin.HandlerFunc
 	if len(cfg.Auth.AdminCIDRs) > 0 {
 		adminMiddleware = adminIPWhitelist(cfg.Auth.AdminCIDRs)
@@ -192,15 +258,41 @@ func main() {
 	api := r.Group("/api", adminMiddleware)
 	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
 
+	// ── HTTP server ────────────────────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-	slog.Info("Library Monitor started", "address", addr)
-
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: r,
 	}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("server error", "error", err)
+
+	prg := &serverProgram{srv: srv}
+	svc, err := service.New(prg, svcConfig)
+	if err != nil {
+		slog.Error("service create", "error", err)
 		os.Exit(1)
+	}
+
+	slog.Info("Library Monitor started", "address", addr)
+
+	// Try to run under the Windows Service Control Manager.
+	// Falls back to foreground run when started directly (dev/debug).
+	if err := svc.Run(); err != nil {
+		slog.Info("Not started by SCM, running directly", "reason", err)
+
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("server error", "error", err)
+				os.Exit(1)
+			}
+		}()
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		<-sigCh
+
+		slog.Info("Shutdown signal, stopping…")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
 	}
 }

@@ -1,17 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kardianos/service"
 )
 
 const (
@@ -26,8 +30,53 @@ var (
 	hostname      string
 	agentIP       string
 	meshID        string
-	serverBaseURL string // HTTP base URL derived from WebSocket URL, used for file downloads
+	serverBaseURL string
 )
+
+// ── Service definition ─────────────────────────────────────────────────────
+
+var svcConfig = &service.Config{
+	Name:        "LibraryAgent",
+	DisplayName: "Library Monitor Agent",
+	Description: "UIII Library Monitor — monitoring agent untuk PC perpustakaan",
+	Option: service.KeyValue{
+		"StartType":              "automatic",
+		"OnFailure":              "restart",
+		"OnFailureDelayDuration": "5s",
+		"OnFailureResetPeriod":   60,
+	},
+}
+
+type agentProgram struct {
+	agentID   string
+	serverURL string
+	cancel    context.CancelFunc
+	done      chan struct{}
+}
+
+func (p *agentProgram) Start(_ service.Service) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.done = make(chan struct{})
+	go func() {
+		defer close(p.done)
+		connectLoop(ctx, p.agentID, p.serverURL)
+	}()
+	return nil
+}
+
+func (p *agentProgram) Stop(_ service.Service) error {
+	logMsg("INFO", "Service stop requested")
+	p.cancel()
+	select {
+	case <-p.done:
+	case <-time.After(10 * time.Second):
+		logMsg("WARN", "Graceful stop timed out")
+	}
+	return nil
+}
+
+// ── Log rotation ───────────────────────────────────────────────────────────
 
 type rotWriter struct {
 	mu      sync.Mutex
@@ -84,7 +133,24 @@ func (w *rotWriter) rotate() {
 	_ = w.open()
 }
 
+// ── Entry point ────────────────────────────────────────────────────────────
+
 func main() {
+	// Handle service control commands first — no expensive setup needed.
+	if len(os.Args) > 1 {
+		prg := &agentProgram{}
+		svc, err := service.New(prg, svcConfig)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "service create: %v\n", err)
+			os.Exit(1)
+		}
+		if err := service.Control(svc, os.Args[1]); err != nil {
+			fmt.Fprintf(os.Stderr, "service %s: %v\n", os.Args[1], err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	initLogger()
 
 	var err error
@@ -102,7 +168,6 @@ func main() {
 	}
 
 	serverURL := getServerURL()
-	// Derive base HTTP URL before appending token query param
 	serverBaseURL = strings.Replace(serverURL, "ws://", "http://", 1)
 	serverBaseURL = strings.Replace(serverBaseURL, "wss://", "https://", 1)
 	serverBaseURL = strings.TrimSuffix(serverBaseURL, "/ws")
@@ -118,14 +183,34 @@ func main() {
 
 	logMsg("INFO", "Agent started, ID: %s, Server: %s, Hostname: %s", agentID, serverURL, hostname)
 
-	connectLoop(agentID, serverURL)
+	prg := &agentProgram{agentID: agentID, serverURL: serverURL}
+	svc, err := service.New(prg, svcConfig)
+	if err != nil {
+		logMsg("ERROR", "Service create: %v", err)
+		os.Exit(1)
+	}
+
+	// Try to run under the Windows Service Control Manager.
+	// If the binary was started directly (not by SCM), svc.Run() returns
+	// an error — fall back to running in the foreground so the binary
+	// remains useful for debugging / manual testing.
+	if err := svc.Run(); err != nil {
+		logMsg("INFO", "Not started by SCM, running directly: %v", err)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+		go connectLoop(ctx, agentID, serverURL)
+
+		<-sigCh
+		logMsg("INFO", "Shutdown signal, stopping…")
+		cancel()
+	}
 }
 
 func initLogger() {
 	_ = os.MkdirAll(agentBaseDir, 0755)
-	// Agent runs as windowsgui (no console). Writing to os.Stdout fails silently
-	// under Task Scheduler SYSTEM, which causes io.MultiWriter to skip the file
-	// writer. Log to file only.
 	rw, err := newRotWriter(agentLogFile, 5, 1)
 	if err != nil {
 		agentLogger = log.New(io.Discard, "", 0)
@@ -139,16 +224,29 @@ func logMsg(level, format string, args ...interface{}) {
 	agentLogger.Printf(ts+" ["+level+"] "+format, args...)
 }
 
-func connectLoop(agentID, serverURL string) {
+// ── Connection loop ────────────────────────────────────────────────────────
+
+func connectLoop(ctx context.Context, agentID, serverURL string) {
 	backoff := initialBackoff
 	attempt := 0
 
 	for {
+		// Exit immediately if context is cancelled.
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		attempt++
 		conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
 		if err != nil {
 			logMsg("INFO", "Connect failed (attempt %d): %v, retry in %v", attempt, err, backoff)
-			time.Sleep(backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
@@ -160,17 +258,28 @@ func connectLoop(agentID, serverURL string) {
 		backoff = initialBackoff
 		attempt = 0
 
-		if err := runSession(conn, agentID); err != nil {
+		if err := runSession(ctx, conn, agentID); err != nil {
+			if ctx.Err() != nil {
+				conn.Close()
+				return
+			}
 			logMsg("ERROR", "Session error: %v", err)
 		}
 		conn.Close()
+
+		if ctx.Err() != nil {
+			return
+		}
 		logMsg("INFO", "Disconnected, reconnecting in %v", initialBackoff)
-		time.Sleep(initialBackoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(initialBackoff):
+		}
 	}
 }
 
-func runSession(conn *websocket.Conn, agentID string) error {
-	// Send metrics immediately on connect
+func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error {
 	if err := sendMetrics(conn, agentID); err != nil {
 		return fmt.Errorf("initial metrics: %w", err)
 	}
@@ -193,6 +302,11 @@ func runSession(conn *websocket.Conn, agentID string) error {
 
 	for {
 		select {
+		case <-ctx.Done():
+			// Graceful close: tell the server we're shutting down.
+			conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"))
+			return nil
 		case err := <-done:
 			return err
 		case <-ticker.C:
@@ -211,7 +325,7 @@ func sendMetrics(conn *websocket.Conn, agentID string) error {
 	payload, err := collectMetrics(agentID, hostname, agentIP, agentOS, meshID)
 	if err != nil {
 		logMsg("ERROR", "Collect metrics: %v", err)
-		return nil // don't disconnect on transient collection error
+		return nil
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -245,9 +359,6 @@ func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
 }
 
 func getLocalIP() string {
-	// UDP dial: no packet sent, but OS resolves the routing table and returns
-	// the local address that would be used for outbound traffic (default route).
-	// This correctly handles multiple NICs, Ethernet 1/2/3, WiFi, etc.
 	conn, err := net.Dial("udp4", "8.8.8.8:80")
 	if err == nil {
 		defer conn.Close()
@@ -255,8 +366,6 @@ func getLocalIP() string {
 			return ip
 		}
 	}
-
-	// Fallback: scan interfaces, skip loopback and link-local (169.254.x.x)
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "unknown"
