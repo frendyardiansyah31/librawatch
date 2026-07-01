@@ -257,6 +257,21 @@ tbody td { padding: 10px 12px; vertical-align: middle; }
 .proc-table th { font-weight: 600; color: var(--muted); background: #f8fafc; }
 .proc-table td:first-child { font-family: monospace; }
 .proc-table tbody tr:last-child td { border-bottom: none; }
+.proc-table td:last-child { width: 28px; padding: 2px 4px; }
+
+.kill-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px;
+  border: none; border-radius: 5px;
+  background: transparent; color: var(--muted);
+  cursor: pointer; opacity: 0; transition: opacity .15s, background .15s, color .15s;
+}
+.proc-row:hover .kill-btn { opacity: 1; }
+.kill-btn:hover { background: #fee2e2; color: #dc2626; }
+.kill-btn:disabled, .kill-btn.killing { opacity: .4; cursor: not-allowed; }
+
+@keyframes fade-out { to { opacity: 0; transform: translateX(6px); } }
+.proc-killed { animation: fade-out .5s ease forwards; }
 
 .no-data { color: var(--muted); font-size: 12px; padding: 8px; }
 

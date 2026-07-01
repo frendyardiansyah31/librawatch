@@ -51,6 +51,23 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		c.JSON(http.StatusOK, metrics)
 	})
 
+	api.POST("/agents/:id/kill", func(c *gin.Context) {
+		var req struct {
+			PID  int    `json:"pid"`
+			Name string `json:"name"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || (req.PID == 0 && req.Name == "") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "pid or name required"})
+			return
+		}
+		output, err := hub.KillProcess(c.Param("id"), req.PID, req.Name)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"output": output})
+	})
+
 	api.GET("/agents/:id/processes", func(c *gin.Context) {
 		procs, err := db.GetProcesses(c.Param("id"))
 		if err != nil {

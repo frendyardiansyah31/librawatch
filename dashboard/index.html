@@ -344,6 +344,13 @@
               <input id="s-smtp-port" type="number" placeholder="587" />
             </div>
             <div class="form-row">
+              <label>Tipe TLS</label>
+              <select id="s-smtp-tls">
+                <option value="starttls">STARTTLS (port 587)</option>
+                <option value="ssl">SSL/TLS (port 465)</option>
+              </select>
+            </div>
+            <div class="form-row">
               <label>Username</label>
               <input
                 id="s-smtp-user"

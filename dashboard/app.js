@@ -263,12 +263,30 @@ async function loadAgentDetail(id, tr) {
         </div>
         <div>
           <h4>Proses Aktif (${(procs||[]).length})</h4>
-          ${buildProcTable(procs)}
+          ${buildProcTable(procs, id)}
         </div>
       </div>`;
   } catch (e) {
     tr.querySelector('.detail-content').innerHTML =
       `<p class="no-data" style="color:var(--red)">${esc(e.message)}</p>`;
+  }
+}
+
+async function killProcess(agentID, pid, name, btn) {
+  if (!confirm(`Kill proses "${name}" (PID ${pid}) di PC ini?`)) return;
+  btn.disabled = true;
+  btn.classList.add('killing');
+  try {
+    const res = await api('POST', `/agents/${agentID}/kill`, { pid, name });
+    const row = document.getElementById('proc-row-' + pid);
+    if (row) {
+      row.classList.add('proc-killed');
+      setTimeout(() => row.remove(), 600);
+    }
+  } catch (e) {
+    alert('Gagal kill proses: ' + e.message);
+    btn.disabled = false;
+    btn.classList.remove('killing');
   }
 }
 
@@ -294,17 +312,25 @@ function buildSparklines(metrics) {
     </div>`;
 }
 
-function buildProcTable(procs) {
+const KILL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+
+function buildProcTable(procs, agentID) {
   if (!procs || !procs.length) return '<p class="no-data">Tidak ada proses aktif</p>';
   const rows = procs.slice(0, 25).map(p => `
-    <tr>
+    <tr class="proc-row" id="proc-row-${p.pid}">
       <td>${esc(p.name)}</td>
-      <td>${p.pid}</td>
+      <td style="font-family:monospace">${p.pid}</td>
       <td>${(p.cpu || 0).toFixed(1)}%</td>
       <td>${(p.ram || 0).toFixed(1)}%</td>
+      <td>
+        <button class="kill-btn" title="Kill ${esc(p.name)} (PID ${p.pid})"
+          onclick="killProcess('${agentID}', ${p.pid}, '${esc(p.name)}', this)">
+          ${KILL_SVG}
+        </button>
+      </td>
     </tr>`).join('');
   return `<table class="proc-table">
-    <thead><tr><th>Proses</th><th>PID</th><th>CPU</th><th>RAM</th></tr></thead>
+    <thead><tr><th>Proses</th><th>PID</th><th>CPU</th><th>RAM</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -591,6 +617,7 @@ async function loadSettings() {
     document.getElementById('s-tg-chat').value   = s.telegram_chat_id       || '';
     document.getElementById('s-smtp-host').value = s.smtp_host              || '';
     document.getElementById('s-smtp-port').value = s.smtp_port              || '587';
+    document.getElementById('s-smtp-tls').value  = s.smtp_tls               || 'starttls';
     document.getElementById('s-smtp-user').value = s.smtp_user              || '';
     document.getElementById('s-smtp-pass').value = s.smtp_pass              || '';
     document.getElementById('s-smtp-to').value   = s.smtp_to                || '';
@@ -616,6 +643,7 @@ async function saveSettings() {
       telegram_chat_id:      document.getElementById('s-tg-chat').value,
       smtp_host:             document.getElementById('s-smtp-host').value,
       smtp_port:             document.getElementById('s-smtp-port').value,
+      smtp_tls:              document.getElementById('s-smtp-tls').value,
       smtp_user:             document.getElementById('s-smtp-user').value,
       smtp_pass:             document.getElementById('s-smtp-pass').value,
       smtp_to:               document.getElementById('s-smtp-to').value,

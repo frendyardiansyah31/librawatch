@@ -50,6 +50,8 @@ type OutgoingMessage struct {
 	Lines    int    `json:"lines,omitempty"`
 	Action   string `json:"action,omitempty"`   // deepfreeze: thaw/freeze/query_df
 	Password string `json:"password,omitempty"` // deepfreeze: optional DF password
+	PID      int    `json:"pid,omitempty"`       // kill_process: target PID
+	ProcName string `json:"proc_name,omitempty"` // kill_process: fallback by name
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
@@ -127,6 +129,7 @@ type Hub struct {
 	authToken     string   // if non-empty, WebSocket clients must provide ?token=
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
 	logWaiters    sync.Map // agentID → chan string, pending log relay
+	killWaiters   sync.Map // agentID → chan string, pending kill result
 }
 
 func NewHub(db *DB) *Hub {
@@ -216,6 +219,8 @@ func (h *Hub) handleMessage(c *Client, data []byte) {
 		h.handleExecResult(&msg)
 	case "log_result":
 		h.handleLogResult(c, &msg)
+	case "kill_result":
+		h.handleKillResult(c, &msg)
 	}
 }
 
@@ -348,6 +353,37 @@ func (h *Hub) RequestAgentLogs(agentID string, lines int) (string, error) {
 		return output, nil
 	case <-time.After(15 * time.Second):
 		return "", fmt.Errorf("agent log request timed out")
+	}
+}
+
+func (h *Hub) handleKillResult(c *Client, msg *IncomingMessage) {
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = msg.AgentID
+	}
+	if v, ok := h.killWaiters.Load(agentID); ok {
+		ch := v.(chan string)
+		select {
+		case ch <- msg.Output:
+		default:
+		}
+	}
+}
+
+func (h *Hub) KillProcess(agentID string, pid int, name string) (string, error) {
+	ch := make(chan string, 1)
+	h.killWaiters.Store(agentID, ch)
+	defer h.killWaiters.Delete(agentID)
+
+	if !h.SendToAgent(agentID, &OutgoingMessage{Type: "kill_process", PID: pid, ProcName: name}) {
+		return "", fmt.Errorf("agent not online")
+	}
+
+	select {
+	case output := <-ch:
+		return output, nil
+	case <-time.After(10 * time.Second):
+		return "", fmt.Errorf("kill request timed out")
 	}
 }
 

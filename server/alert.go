@@ -193,21 +193,35 @@ func (a *Alerter) sendTelegram(message, token, chatID string) {
 	}
 }
 
-func (a *Alerter) sendEmail(message string, settings map[string]string) {
+func buildDialer(settings map[string]string) (*gomail.Dialer, string, string, bool) {
 	host := settings["smtp_host"]
-	to := settings["smtp_to"]
+	to   := settings["smtp_to"]
 	user := settings["smtp_user"]
 	pass := settings["smtp_pass"]
 	port := parseIntSetting(settings["smtp_port"], 587)
 	if host == "" || to == "" || user == "" {
+		return nil, "", "", false
+	}
+	d := gomail.NewDialer(host, port, user, pass)
+	switch settings["smtp_tls"] {
+	case "ssl":
+		d.SSL = true
+	default: // "starttls" or empty
+		d.SSL = false
+	}
+	return d, user, to, true
+}
+
+func (a *Alerter) sendEmail(message string, settings map[string]string) {
+	d, from, to, ok := buildDialer(settings)
+	if !ok {
 		return
 	}
 	m := gomail.NewMessage()
-	m.SetHeader("From", user)
+	m.SetHeader("From", from)
 	m.SetHeader("To", to)
 	m.SetHeader("Subject", "Library Monitor Alert")
 	m.SetBody("text/plain", message)
-	d := gomail.NewDialer(host, port, user, pass)
 	if err := d.DialAndSend(m); err != nil {
 		slog.Error("email: send failed", "error", err)
 	}
@@ -254,20 +268,15 @@ func (a *Alerter) SendTestEmail() error {
 	if err != nil {
 		return err
 	}
-	host := settings["smtp_host"]
-	to   := settings["smtp_to"]
-	user := settings["smtp_user"]
-	pass := settings["smtp_pass"]
-	port := parseIntSetting(settings["smtp_port"], 587)
-	if host == "" || to == "" || user == "" {
+	d, from, to, ok := buildDialer(settings)
+	if !ok {
 		return fmt.Errorf("Email belum dikonfigurasi (smtp_host/smtp_to/smtp_user kosong)")
 	}
 	m := gomail.NewMessage()
-	m.SetHeader("From", user)
+	m.SetHeader("From", from)
 	m.SetHeader("To", to)
 	m.SetHeader("Subject", "Library Monitor UIII — Tes Email")
 	m.SetBody("text/plain", "✅ Library Monitor UIII: Tes notifikasi email berhasil")
-	d := gomail.NewDialer(host, port, user, pass)
 	return d.DialAndSend(m)
 }
 

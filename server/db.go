@@ -681,6 +681,7 @@ func (db *DB) InitDefaultSettings(cfg *Config) error {
 		"telegram_chat_id":      cfg.Telegram.ChatID,
 		"smtp_host":             cfg.Email.SMTPHost,
 		"smtp_port":             fmt.Sprintf("%d", cfg.Email.SMTPPort),
+		"smtp_tls":              "starttls",
 		"smtp_user":             cfg.Email.SMTPUser,
 		"smtp_pass":             cfg.Email.SMTPPass,
 		"smtp_to":               cfg.Email.SMTPTo,

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -322,6 +323,9 @@ func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error
 }
 
 func sendMetrics(conn *websocket.Conn, agentID string) error {
+	if current := getLocalIP(); current != "unknown" {
+		agentIP = current
+	}
 	payload, err := collectMetrics(agentID, hostname, agentIP, agentOS, meshID)
 	if err != nil {
 		logMsg("ERROR", "Collect metrics: %v", err)
@@ -349,6 +353,8 @@ func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
 		go executeCommand(conn, agentID, msg)
 	case "file_deploy":
 		go deployFile(conn, agentID, msg)
+	case "kill_process":
+		go handleKillProcess(conn, agentID, msg)
 	case "get_logs":
 		go sendLogLines(conn, agentID, msg)
 	case "deepfreeze":
@@ -358,17 +364,44 @@ func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
 	}
 }
 
-func getLocalIP() string {
-	conn, err := net.Dial("udp4", "8.8.8.8:80")
-	if err == nil {
-		defer conn.Close()
-		if ip := conn.LocalAddr().(*net.UDPAddr).IP.String(); ip != "" {
-			return ip
-		}
+func handleKillProcess(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+	pid := int(floatVal(msg["pid"]))
+	name, _ := msg["proc_name"].(string)
+
+	var cmd *exec.Cmd
+	if pid > 0 {
+		cmd = exec.Command("taskkill", "/F", "/PID", fmt.Sprintf("%d", pid))
+	} else {
+		cmd = exec.Command("taskkill", "/F", "/IM", name)
 	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, _ := cmd.CombinedOutput()
+	output := strings.TrimSpace(string(out))
+	if output == "" {
+		output = fmt.Sprintf("kill PID %d attempted", pid)
+	}
+
+	resp := map[string]interface{}{
+		"type":     "kill_result",
+		"agent_id": agentID,
+		"output":   output,
+	}
+	data, _ := json.Marshal(resp)
+	_ = conn.WriteMessage(websocket.TextMessage, data)
+	logMsg("INFO", "kill_process pid=%d name=%s output=%s", pid, name, output)
+}
+
+func floatVal(v interface{}) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	return 0
+}
+
+func scanInterfaces() string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "unknown"
+		return ""
 	}
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
@@ -384,6 +417,26 @@ func getLocalIP() string {
 			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
 				return ip.String()
 			}
+		}
+	}
+	return ""
+}
+
+func getLocalIP() string {
+	for i := 0; i < 3; i++ {
+		conn, err := net.Dial("udp4", "8.8.8.8:80")
+		if err == nil {
+			ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
+			conn.Close()
+			if ip != "" && ip != "<nil>" {
+				return ip
+			}
+		}
+		if ip := scanInterfaces(); ip != "" {
+			return ip
+		}
+		if i < 2 {
+			time.Sleep(2 * time.Second)
 		}
 	}
 	return "unknown"
