@@ -280,6 +280,11 @@ func main() {
 	// /api/login is public — must be registered before the protected group.
 	r.POST("/api/login", handleLogin(authMgr, db, loginLimiter))
 
+	// /api/file/:filename is public so agents can download files without a
+	// dashboard session token. Files are admin-uploaded (extension whitelist)
+	// and served from the uploads directory with path-traversal protection.
+	r.GET("/api/file/:filename", publicFileHandler(cfg.Uploads.Path))
+
 	api := r.Group("/api", adminMiddleware, authMgr.Middleware())
 	api.POST("/logout", handleLogout(authMgr, db))
 	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)

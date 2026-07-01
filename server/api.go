@@ -350,22 +350,8 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		c.JSON(http.StatusOK, gin.H{"filename": filename})
 	})
 
-	api.GET("/file/:filename", func(c *gin.Context) {
-		safe := filepath.Base(filepath.Clean(c.Param("filename")))
-		if safe == "." || safe == ".." {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid filename"})
-			return
-		}
-		dest := filepath.Join(uploadsPath, safe)
-		// Belt-and-suspenders: verify resolved path stays within uploadsPath.
-		uploadsAbs, _ := filepath.Abs(uploadsPath)
-		destAbs, _ := filepath.Abs(dest)
-		if !strings.HasPrefix(destAbs, uploadsAbs+string(filepath.Separator)) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
-			return
-		}
-		c.File(dest)
-	})
+	// GET /api/file/:filename is registered publicly in main.go so agents can
+	// download files without a dashboard session token. See publicFileHandler.
 
 	// ── Test notifications ────────────────────────────────────────────────
 
@@ -428,4 +414,25 @@ func tailFile(path string, n int) (string, error) {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// publicFileHandler serves uploaded files without requiring a dashboard session
+// token, so agents can download files (e.g. agent.exe update) via HTTP.
+// Path-traversal protection is still enforced.
+func publicFileHandler(uploadsPath string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		safe := filepath.Base(filepath.Clean(c.Param("filename")))
+		if safe == "." || safe == ".." {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid filename"})
+			return
+		}
+		dest := filepath.Join(uploadsPath, safe)
+		uploadsAbs, _ := filepath.Abs(uploadsPath)
+		destAbs, _ := filepath.Abs(dest)
+		if !strings.HasPrefix(destAbs, uploadsAbs+string(filepath.Separator)) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+			return
+		}
+		c.File(dest)
+	}
 }
