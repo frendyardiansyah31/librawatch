@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,57 @@ var allowedUploadExts = map[string]bool{
 	".msi": true,
 	".bat": true,
 	".ps1": true,
+}
+
+// wingetIDRe matches valid winget package IDs: Publisher.AppName style.
+// Allows letters, digits, dots, dashes, underscores, plus signs.
+var wingetIDRe = regexp.MustCompile(`^[A-Za-z0-9][\w.\-+]*$`)
+
+// validateDeployRequest checks that the payload is safe for the given deploy type.
+func validateDeployRequest(typ, payload, args string) error {
+	switch typ {
+	case "exec":
+		if len(payload) > 8192 {
+			return fmt.Errorf("payload exceeds maximum length of 8192 characters")
+		}
+		if strings.ContainsRune(payload, 0) {
+			return fmt.Errorf("payload contains invalid characters")
+		}
+
+	case "winget":
+		// Expected format: "winget install --id <ID> ..." or "winget uninstall --id <ID> ..."
+		fields := strings.Fields(payload)
+		// fields[0]=winget fields[1]=install|uninstall fields[2]=--id fields[3]=<ID>
+		if len(fields) < 4 || fields[0] != "winget" ||
+			(fields[1] != "install" && fields[1] != "uninstall") ||
+			fields[2] != "--id" {
+			return fmt.Errorf("invalid winget command format")
+		}
+		if !wingetIDRe.MatchString(fields[3]) {
+			return fmt.Errorf("invalid winget package ID: only letters, digits, dots, dashes, underscores and plus signs allowed")
+		}
+
+	case "file_deploy":
+		if len(args) > 512 {
+			return fmt.Errorf("args exceeds maximum length of 512 characters")
+		}
+		if strings.ContainsRune(args, 0) {
+			return fmt.Errorf("args contains invalid characters")
+		}
+
+	case "deepfreeze":
+		allowed := map[string]bool{"thaw": true, "freeze": true, "query_df": true}
+		if !allowed[payload] {
+			return fmt.Errorf("invalid deepfreeze action: must be thaw, freeze, or query_df")
+		}
+
+	case "install_ssh":
+		// No user-controlled payload.
+
+	default:
+		return fmt.Errorf("unknown deploy type: %s", typ)
+	}
+	return nil
 }
 
 func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter, deployer *Deployer, uploadsPath string, maxUploadMB int64) {
@@ -207,6 +259,10 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		}
 		if req.Type != "install_ssh" && req.Payload == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "payload is required for type " + req.Type})
+			return
+		}
+		if err := validateDeployRequest(req.Type, req.Payload, req.Args); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		payloadPreview := req.Payload

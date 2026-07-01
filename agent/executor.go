@@ -49,15 +49,18 @@ func deployFile(conn *websocket.Conn, agentID string, msg map[string]interface{}
 		return
 	}
 
+	// Escape single quotes so they cannot break out of the PS string literal.
+	safePath := strings.ReplaceAll(localPath, "'", "''")
 	var psCmd string
 	if args != "" {
+		safeArgs := strings.ReplaceAll(args, "'", "''")
 		psCmd = fmt.Sprintf(
 			"$p = Start-Process -FilePath '%s' -ArgumentList '%s' -Wait -PassThru; $p.ExitCode",
-			localPath, args)
+			safePath, safeArgs)
 	} else {
 		psCmd = fmt.Sprintf(
 			"$p = Start-Process -FilePath '%s' -Wait -PassThru; $p.ExitCode",
-			localPath)
+			safePath)
 	}
 
 	cmd := exec.Command("powershell.exe",
