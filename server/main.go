@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/kardianos/service"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ── Log rotation ───────────────────────────────────────────────────────────
@@ -159,8 +160,21 @@ func main() {
 		_ = os.Chdir(filepath.Dir(exePath))
 	}
 
-	// Handle service control commands first — skip expensive startup.
+	// Handle subcommands first — skip expensive startup.
 	if len(os.Args) > 1 {
+		if os.Args[1] == "hash-password" {
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: library-server hash-password <plaintext>")
+				os.Exit(1)
+			}
+			hash, err := bcrypt.GenerateFromPassword([]byte(os.Args[2]), bcrypt.DefaultCost)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hash error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(string(hash))
+			return
+		}
 		prg := &serverProgram{}
 		svc, err := service.New(prg, svcConfig)
 		if err != nil {
@@ -215,6 +229,7 @@ func main() {
 	}
 
 	hub := NewHub(db)
+	hub.batcher = NewMetricsBatcher(db)
 	hub.authToken = cfg.Auth.Token
 	if hub.authToken != "" {
 		slog.Info("WebSocket auth enabled")
@@ -260,11 +275,13 @@ func main() {
 	})
 	r.Static("/static", "./dashboard")
 
+	loginLimiter := NewLoginRateLimiter(rateLimitMaxAttempts, rateLimitWindow)
+
 	// /api/login is public — must be registered before the protected group.
-	r.POST("/api/login", handleLogin(authMgr))
+	r.POST("/api/login", handleLogin(authMgr, db, loginLimiter))
 
 	api := r.Group("/api", adminMiddleware, authMgr.Middleware())
-	api.POST("/logout", handleLogout(authMgr))
+	api.POST("/logout", handleLogout(authMgr, db))
 	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
 
 	// ── HTTP server ────────────────────────────────────────────────────────

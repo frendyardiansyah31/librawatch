@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -242,11 +243,13 @@ func connectLoop(ctx context.Context, agentID, serverURL string) {
 		attempt++
 		conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
 		if err != nil {
-			logMsg("INFO", "Connect failed (attempt %d): %v, retry in %v", attempt, err, backoff)
+			jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
+			wait := backoff + jitter
+			logMsg("INFO", "Connect failed (attempt %d): %v, retry in %v", attempt, err, wait)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-time.After(wait):
 			}
 			backoff *= 2
 			if backoff > maxBackoff {

@@ -17,3 +17,5 @@ logs/
 uploads/
 ready-publish-plan.md
 DEPLOY.md
+server/batcher_test.go
+server/batcher.go

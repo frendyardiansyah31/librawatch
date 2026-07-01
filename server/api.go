@@ -14,6 +14,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var allowedUploadExts = map[string]bool{
+	".exe": true,
+	".msi": true,
+	".bat": true,
+	".ps1": true,
+}
+
 func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter, deployer *Deployer, uploadsPath string, maxUploadMB int64) {
 	// ── Agents ──────────────────────────────────────────────────────────
 
@@ -60,11 +67,13 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			c.JSON(http.StatusBadRequest, gin.H{"error": "pid or name required"})
 			return
 		}
-		output, err := hub.KillProcess(c.Param("id"), req.PID, req.Name)
+		agentID := c.Param("id")
+		output, err := hub.KillProcess(agentID, req.PID, req.Name)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		db.InsertAuditLog("kill_process", agentID, fmt.Sprintf("pid=%d name=%s", req.PID, req.Name), c.ClientIP())
 		c.JSON(http.StatusOK, gin.H{"output": output})
 	})
 
@@ -146,6 +155,19 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
+	api.GET("/audit", func(c *gin.Context) {
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+		logs, err := db.GetAuditLogs(limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if logs == nil {
+			logs = []AuditLog{}
+		}
+		c.JSON(http.StatusOK, logs)
+	})
+
 	// ── Health ───────────────────────────────────────────────────────────
 
 	api.GET("/health", func(c *gin.Context) {
@@ -201,6 +223,7 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		db.InsertAuditLog("deploy", strings.Join(req.Targets, ","), fmt.Sprintf("type=%s payload=%s", req.Type, payloadPreview), c.ClientIP())
 		c.JSON(http.StatusOK, job)
 	})
 
@@ -214,11 +237,13 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 	})
 
 	api.DELETE("/deploy/:id", func(c *gin.Context) {
-		if err := db.CancelDeployJob(c.Param("id")); err != nil {
+		jobID := c.Param("id")
+		if err := db.CancelDeployJob(jobID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		slog.Info("deploy job cancelled", "job_id", c.Param("id"), "source_ip", c.ClientIP())
+		slog.Info("deploy job cancelled", "job_id", jobID, "source_ip", c.ClientIP())
+		db.InsertAuditLog("cancel_deploy", jobID, "", c.ClientIP())
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
@@ -255,16 +280,35 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid filename"})
 			return
 		}
+		ext := strings.ToLower(filepath.Ext(filename))
+		if !allowedUploadExts[ext] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "file type not allowed (.exe .msi .bat .ps1 only)"})
+			return
+		}
 		dest := filepath.Join(uploadsPath, filename)
 		if err := c.SaveUploadedFile(file, dest); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		db.InsertAuditLog("upload", filename, fmt.Sprintf("size=%d", file.Size), c.ClientIP())
 		c.JSON(http.StatusOK, gin.H{"filename": filename})
 	})
 
 	api.GET("/file/:filename", func(c *gin.Context) {
-		c.File(uploadsPath + "/" + c.Param("filename"))
+		safe := filepath.Base(filepath.Clean(c.Param("filename")))
+		if safe == "." || safe == ".." {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid filename"})
+			return
+		}
+		dest := filepath.Join(uploadsPath, safe)
+		// Belt-and-suspenders: verify resolved path stays within uploadsPath.
+		uploadsAbs, _ := filepath.Abs(uploadsPath)
+		destAbs, _ := filepath.Abs(dest)
+		if !strings.HasPrefix(destAbs, uploadsAbs+string(filepath.Separator)) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+			return
+		}
+		c.File(dest)
 	})
 
 	// ── Test notifications ────────────────────────────────────────────────

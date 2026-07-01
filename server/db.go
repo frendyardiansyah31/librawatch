@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -106,6 +107,15 @@ type DeployResult struct {
 	ExecutedAt *time.Time `json:"executed_at"`
 }
 
+type AuditLog struct {
+	ID     int64  `json:"id"`
+	Ts     string `json:"ts"`
+	Action string `json:"action"`
+	Target string `json:"target"`
+	Detail string `json:"detail"`
+	IP     string `json:"ip"`
+}
+
 // ─── DB Init ───────────────────────────────────────────────────────────────
 
 type DB struct {
@@ -139,6 +149,8 @@ func (db *DB) configure() error {
 	for _, pragma := range []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
+		"PRAGMA cache_size=-64000", // 64 MB page cache
+		"PRAGMA temp_store=MEMORY",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA busy_timeout=5000",
 	} {
@@ -224,6 +236,16 @@ func (db *DB) migrate() error {
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS audit_logs (
+		id     INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts     TEXT NOT NULL,
+		action TEXT NOT NULL,
+		target TEXT NOT NULL DEFAULT '',
+		detail TEXT NOT NULL DEFAULT '',
+		ip     TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts);
 	`)
 	return err
 }
@@ -378,7 +400,7 @@ func (db *DB) GetMetrics24h(agentID string) ([]Metric, error) {
 }
 
 func (db *DB) PurgeOldMetrics() error {
-	cutoff := fmtTime(nowWIB().Add(-24 * time.Hour))
+	cutoff := fmtTime(nowWIB().Add(-7 * 24 * time.Hour))
 	_, err := db.Exec(`DELETE FROM metrics WHERE recorded_at < ?`, cutoff)
 	return err
 }
@@ -700,4 +722,39 @@ func (db *DB) InitDefaultSettings(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// ─── Audit Log Queries ─────────────────────────────────────────────────────
+
+func (db *DB) InsertAuditLog(action, target, detail, ip string) {
+	_, err := db.Exec(
+		`INSERT INTO audit_logs (ts, action, target, detail, ip) VALUES (?, ?, ?, ?, ?)`,
+		fmtTime(nowWIB()), action, target, detail, ip,
+	)
+	if err != nil {
+		slog.Error("audit log insert failed", "action", action, "error", err)
+	}
+}
+
+func (db *DB) GetAuditLogs(limit int) ([]AuditLog, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := db.Query(
+		`SELECT id, ts, action, target, detail, ip FROM audit_logs ORDER BY id DESC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []AuditLog
+	for rows.Next() {
+		var a AuditLog
+		if err := rows.Scan(&a.ID, &a.Ts, &a.Action, &a.Target, &a.Detail, &a.IP); err != nil {
+			return nil, err
+		}
+		result = append(result, a)
+	}
+	return result, rows.Err()
 }

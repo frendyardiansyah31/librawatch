@@ -126,6 +126,7 @@ type Hub struct {
 	db            *DB
 	alerter       *Alerter
 	deployer      *Deployer
+	batcher       *MetricsBatcher
 	authToken     string   // if non-empty, WebSocket clients must provide ?token=
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
 	logWaiters    sync.Map // agentID → chan string, pending log relay
@@ -266,8 +267,12 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 		return
 	}
 
-	if err := h.db.InsertMetric(msg.AgentID, msg.CPU, msg.RAM); err != nil {
-		slog.Error("insert metric failed", "agent_id", msg.AgentID, "error", err)
+	if h.batcher != nil {
+		h.batcher.Add(msg.AgentID, msg.CPU, msg.RAM)
+	} else {
+		if err := h.db.InsertMetric(msg.AgentID, msg.CPU, msg.RAM); err != nil {
+			slog.Error("insert metric failed", "agent_id", msg.AgentID, "error", err)
+		}
 	}
 
 	if len(msg.Processes) > 0 {
