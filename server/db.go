@@ -252,6 +252,26 @@ func (db *DB) migrate() error {
 
 // ─── Agent Queries ─────────────────────────────────────────────────────────
 
+func (db *DB) DeleteAgent(id string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, q := range []string{
+		`DELETE FROM metrics       WHERE agent_id = ?`,
+		`DELETE FROM processes     WHERE agent_id = ?`,
+		`DELETE FROM alerts        WHERE agent_id = ?`,
+		`DELETE FROM deploy_results WHERE agent_id = ?`,
+		`DELETE FROM agents        WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (db *DB) UpsertAgent(a *Agent) error {
 	_, err := db.Exec(`
 		INSERT INTO agents (id, hostname, ip, os, last_seen, mesh_id, status, created_at)

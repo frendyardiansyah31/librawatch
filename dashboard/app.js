@@ -209,6 +209,13 @@ function renderAgents(agents) {
         ${meshLink}
         <button class="btn-sm"
           onclick="openAgentLogs('${esc(ag.id)}','${esc(ag.hostname)}');event.stopPropagation()">Logs</button>
+        <button class="btn-sm btn-delete-agent" title="Hapus agent ini"
+          onclick="deleteAgent('${esc(ag.id)}','${esc(ag.hostname)}');event.stopPropagation()">
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+          </svg>
+        </button>
       </td>`;
 
     tr.addEventListener('click', e => {
@@ -269,6 +276,21 @@ async function loadAgentDetail(id, tr) {
   } catch (e) {
     tr.querySelector('.detail-content').innerHTML =
       `<p class="no-data" style="color:var(--red)">${esc(e.message)}</p>`;
+  }
+}
+
+async function deleteAgent(id, hostname) {
+  if (!confirm(`Hapus agent "${hostname}"?\n\nSemua data (metrics, proses, alerts) akan dihapus permanen.`)) return;
+  try {
+    await api('DELETE', `/agents/${id}`);
+    const row = document.querySelector(`tr.agent-row[data-id="${id}"]`);
+    const detail = document.getElementById('detail-' + id);
+    if (detail) detail.remove();
+    if (row) row.remove();
+    expandedRows.delete(id);
+    allAgents = allAgents.filter(a => a.id !== id);
+  } catch (e) {
+    alert('Gagal hapus agent: ' + e.message);
   }
 }
 

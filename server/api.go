@@ -156,6 +156,17 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
+	api.DELETE("/agents/:id", func(c *gin.Context) {
+		agentID := c.Param("id")
+		if err := db.DeleteAgent(agentID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		db.InsertAuditLog("delete_agent", agentID, "", c.ClientIP())
+		slog.Info("agent deleted", "agent_id", agentID, "ip", c.ClientIP())
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
 	// ── Alerts ──────────────────────────────────────────────────────────
 
 	api.GET("/alerts", func(c *gin.Context) {

@@ -68,6 +68,13 @@ header {
 }
 .btn-icon:hover { color: var(--blue); border-color: var(--blue); }
 
+.btn-delete-agent {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  transition: color .15s, border-color .15s;
+}
+.btn-delete-agent:hover { color: #dc2626; border-color: #dc2626; }
+
 /* ── Nav ──────────────────────────────────────────────────────────────────── */
 nav {
   background: var(--surface);
