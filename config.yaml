@@ -3,8 +3,10 @@ server:
   host: "0.0.0.0"
 
 auth:
-  token: ""           # token untuk agent WebSocket (kosong = nonaktif)
-  admin_cidrs: []     # contoh: ["10.5.39.88/32"] — batasi dashboard ke IP admin saja
+  token: ""             # token untuk agent WebSocket (kosong = nonaktif)
+  admin_cidrs: []       # contoh: ["10.5.39.88/32"] — batasi dashboard ke IP admin saja
+  admin_username: "admin"
+  admin_password: "admin123"
 
 database:
   path: "./data/library.db"

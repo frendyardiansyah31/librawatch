@@ -27,7 +27,17 @@
         </div>
       </div>
       <button class="btn-icon" onclick="openSettings()" title="Pengaturan">
-        ⚙
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+      <button class="btn-icon" onclick="doLogout()" title="Logout" id="btn-logout" style="display:none">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+          <polyline points="16 17 21 12 16 7"/>
+          <line x1="21" y1="12" x2="9" y2="12"/>
+        </svg>
       </button>
     </header>
 
@@ -400,6 +410,23 @@
 Memuat…</pre
           >
         </div>
+      </div>
+    </div>
+
+    <!-- ── Login Overlay ────────────────────────────────────────────────────── -->
+    <div id="login-overlay" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.85);z-index:1000;align-items:center;justify-content:center;">
+      <div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:36px 40px;width:320px;box-shadow:0 20px 60px rgba(0,0,0,.5);">
+        <h2 style="margin:0 0 4px;font-size:18px;color:#e2e8f0">Library Monitor</h2>
+        <p style="margin:0 0 24px;font-size:13px;color:#94a3b8">Jusuf Kalla Library — UIII</p>
+        <input id="login-user" type="text" placeholder="Username" autocomplete="username"
+          style="display:block;width:100%;box-sizing:border-box;margin-bottom:10px;padding:9px 12px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:14px;outline:none;" />
+        <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password"
+          style="display:block;width:100%;box-sizing:border-box;margin-bottom:16px;padding:9px 12px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:14px;outline:none;" />
+        <button id="login-btn" onclick="doLogin()"
+          style="width:100%;padding:10px;border-radius:6px;border:none;background:#3b82f6;color:#fff;font-size:14px;font-weight:600;cursor:pointer;">
+          Masuk
+        </button>
+        <p id="login-error" style="margin:10px 0 0;font-size:13px;color:#ef4444;min-height:18px;"></p>
       </div>
     </div>
 

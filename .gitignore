@@ -15,3 +15,5 @@ library-server~
 # Generated runtime directories
 logs/
 uploads/
+ready-publish-plan.md
+DEPLOY.md

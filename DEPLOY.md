@@ -21,8 +21,8 @@ Dell T40  (Windows 10 Pro, IP 192.168.1.10)
 ### 1.1 Build Server (untuk Dell T40, Windows)
 
 ```powershell
-cd C:\Development\go-rmm\server
-go build -ldflags="-s -w" -o ..\library-server.exe .
+cd C:\Development\go-rmm
+go build -ldflags="-s -w" -o library-server.exe .\server\
 ```
 
 ### 1.2 Build Agent (untuk 60 PC Windows 11)
@@ -65,10 +65,11 @@ C:\LibraryMonitor\
     style.css
 ```
 
-> Cara copy: share folder, USB, atau robocopy via jaringan:
+> Cara copy via jaringan (share folder atau admin share):
 > ```powershell
-> robocopy C:\Development\go-rmm \\192.168.1.10\C$\LibraryMonitor `
->   library-server.exe config.yaml /E /XD .git data logs uploads deploy agent test
+> # Copy binary dan config (hanya 2 file dari root)
+> robocopy C:\Development\go-rmm \\192.168.1.10\C$\LibraryMonitor library-server.exe config.yaml
+> # Copy folder dashboard
 > robocopy C:\Development\go-rmm\dashboard \\192.168.1.10\C$\LibraryMonitor\dashboard /E
 > ```
 
@@ -81,6 +82,10 @@ server:
   host: "0.0.0.0"   # tidak perlu diubah
   port: 8080         # port dashboard & WebSocket agent
 
+auth:
+  token: ""          # token untuk agent WebSocket (kosong = nonaktif)
+  admin_cidrs: []    # batasi akses dashboard, contoh: ["192.168.1.0/24"]
+
 database:
   path: "./data/library.db"   # dibuat otomatis
 
@@ -92,6 +97,8 @@ alerts:
     - "steam.exe"
     - "discord.exe"
     - "epicgameslauncher.exe"
+    - "battle.net.exe"
+    - "leagueoflegends.exe"
 
 telegram:
   token: ""          # isi token bot Telegram jika dipakai
@@ -112,7 +119,7 @@ uploads:
   max_size_mb: 500
 ```
 
-### 2.3 Tes Jalankan Server (sekali dulu)
+### 2.3 Tes Jalankan Server (sekali dulu, foreground)
 
 Buka PowerShell **as Administrator** di T40:
 
@@ -124,33 +131,38 @@ cd C:\LibraryMonitor
 Buka browser: `http://localhost:8080` — pastikan dashboard muncul.
 Tekan `Ctrl+C` untuk stop setelah tes berhasil.
 
-### 2.4 Daftarkan ke Task Scheduler (auto-start saat boot)
+### 2.4 Install sebagai Windows Service (auto-start saat boot)
 
+Server sudah built-in Windows Service via `kardianos/service` — tidak perlu Task Scheduler.
 Jalankan di PowerShell **as Administrator** di T40:
 
 ```powershell
-$action  = New-ScheduledTaskAction `
-    -Execute "C:\LibraryMonitor\library-server.exe" `
-    -WorkingDirectory "C:\LibraryMonitor"
+cd C:\LibraryMonitor
 
-$trigger = New-ScheduledTaskTrigger -AtStartup
-
-$settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit 0 `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1)
-
-Register-ScheduledTask `
-    -TaskName "LibraryMonitor" `
-    -Action $action `
-    -Trigger $trigger `
-    -RunLevel Highest `
-    -User "SYSTEM" `
-    -Settings $settings `
-    -Force
+# Daftarkan ke Windows Service Control Manager (sekali saja)
+.\library-server.exe install
 
 # Langsung jalankan sekarang
-Start-ScheduledTask -TaskName "LibraryMonitor"
+.\library-server.exe start
+```
+
+Service terdaftar dengan nama **LibraryMonitor**, start type **Automatic**, restart otomatis jika crash.
+
+**Perintah service lainnya:**
+
+```powershell
+.\library-server.exe stop       # stop service
+.\library-server.exe restart    # restart service
+.\library-server.exe uninstall  # hapus dari service list
+```
+
+**Verifikasi service berjalan:**
+
+```powershell
+Get-Service LibraryMonitor
+# Status harus: Running
+
+Get-Content C:\LibraryMonitor\logs\server.log -Tail 20
 ```
 
 ### 2.5 Buka Port di Windows Firewall T40

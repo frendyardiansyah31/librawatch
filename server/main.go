@@ -208,7 +208,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ── Hub / Alerter / Deployer ───────────────────────────────────────────
+	// ── Auth / Hub / Alerter / Deployer ───────────────────────────────────
+	authMgr := NewAuthManager(cfg.Auth.AdminUsername, cfg.Auth.AdminPassword)
+	if cfg.Auth.AdminUsername != "" {
+		slog.Info("admin auth enabled", "username", cfg.Auth.AdminUsername)
+	}
+
 	hub := NewHub(db)
 	hub.authToken = cfg.Auth.Token
 	if hub.authToken != "" {
@@ -255,7 +260,11 @@ func main() {
 	})
 	r.Static("/static", "./dashboard")
 
-	api := r.Group("/api", adminMiddleware)
+	// /api/login is public — must be registered before the protected group.
+	r.POST("/api/login", handleLogin(authMgr))
+
+	api := r.Group("/api", adminMiddleware, authMgr.Middleware())
+	api.POST("/logout", handleLogout(authMgr))
 	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
 
 	// ── HTTP server ────────────────────────────────────────────────────────

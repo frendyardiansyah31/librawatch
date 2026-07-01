@@ -9,9 +9,64 @@ let deployPollers = {};
 let refreshTimer  = null;
 let meshBaseURL   = '';
 
+// ── Auth ───────────────────────────────────────────────────────────────────
+function getToken() { return localStorage.getItem('auth_token') || ''; }
+function setToken(t) { localStorage.setItem('auth_token', t); }
+function clearToken() { localStorage.removeItem('auth_token'); }
+
+function showLogin() {
+  const el = document.getElementById('login-overlay');
+  if (el) { el.style.display = 'flex'; }
+  const btn = document.getElementById('btn-logout');
+  if (btn) btn.style.display = 'none';
+}
+function hideLogin() {
+  const el = document.getElementById('login-overlay');
+  if (el) { el.style.display = 'none'; }
+  const btn = document.getElementById('btn-logout');
+  if (btn) btn.style.display = '';
+}
+
+async function doLogout() {
+  try { await api('POST', '/logout'); } catch (_) { /* ignore */ }
+  clearToken();
+  showLogin();
+}
+
+async function doLogin() {
+  const user  = document.getElementById('login-user').value.trim();
+  const pass  = document.getElementById('login-pass').value;
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      errEl.textContent = data.error || 'Login gagal';
+      return;
+    }
+    setToken(data.token);
+    hideLogin();
+    await loadAgents();
+    refreshTimer = setInterval(loadAgents, 10000);
+  } catch (e) {
+    errEl.textContent = 'Koneksi gagal: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ── API ────────────────────────────────────────────────────────────────────
 async function api(method, path, body) {
+  const token = getToken();
   const opts = { method, headers: {} };
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
   if (body instanceof FormData) {
     opts.body = body;
   } else if (body !== undefined) {
@@ -19,6 +74,11 @@ async function api(method, path, body) {
     opts.body = JSON.stringify(body);
   }
   const r = await fetch('/api' + path, opts);
+  if (r.status === 401) {
+    clearToken();
+    showLogin();
+    throw new Error('Session berakhir, silakan login kembali');
+  }
   const data = await r.json().catch(() => ({ error: r.statusText }));
   if (!r.ok) throw new Error(data.error || r.statusText);
   return data;
@@ -612,6 +672,18 @@ document.addEventListener('keydown', e => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 (async function init() {
+  // support Enter key on login form
+  ['login-user', 'login-pass'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  });
+
+  if (!getToken()) {
+    showLogin();
+    return;
+  }
+  const btn = document.getElementById('btn-logout');
+  if (btn) btn.style.display = '';
   await loadAgents();
   refreshTimer = setInterval(loadAgents, 10000);
 })();

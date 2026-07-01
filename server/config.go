@@ -14,8 +14,10 @@ type Config struct {
 	} `yaml:"server"`
 
 	Auth struct {
-		Token      string   `yaml:"token"`       // WebSocket token for agents (empty = disabled)
-		AdminCIDRs []string `yaml:"admin_cidrs"` // IP ranges allowed to access dashboard/API (empty = all)
+		Token         string   `yaml:"token"`          // WebSocket token for agents (empty = disabled)
+		AdminCIDRs    []string `yaml:"admin_cidrs"`    // IP ranges allowed to access dashboard/API (empty = all)
+		AdminUsername string   `yaml:"admin_username"` // dashboard login username (empty = auth disabled)
+		AdminPassword string   `yaml:"admin_password"` // dashboard login password
 	} `yaml:"auth"`
 
 	Database struct {
@@ -57,8 +59,10 @@ const defaultConfigYAML = `server:
   host: "0.0.0.0"
 
 auth:
-  token: ""         # token untuk agent WebSocket (kosong = nonaktif)
-  admin_cidrs: []   # batasi akses dashboard/API ke IP tertentu, contoh: ["10.5.39.88/32"]
+  token: ""             # token untuk agent WebSocket (kosong = nonaktif)
+  admin_cidrs: []       # batasi akses dashboard/API ke IP tertentu, contoh: ["10.5.39.88/32"]
+  admin_username: ""    # username login dashboard (kosong = auth nonaktif)
+  admin_password: ""    # password login dashboard
 
 database:
   path: "./data/library.db"
