@@ -59,6 +59,7 @@ type Agent struct {
 	AgentVersion   string    `json:"agent_version"`
 	WindowsVersion string    `json:"windows_version"`
 	DiskCapacityGB float64   `json:"disk_capacity_gb"`
+	DeviceGroup    string    `json:"device_group"`
 }
 
 type AgentWithMetrics struct {
@@ -164,6 +165,54 @@ type AppMetadata struct {
 	Size           int64
 	FileCreatedAt  time.Time
 	FileModifiedAt time.Time
+}
+
+// Event action values, set by the Policy Engine (server/policy.go) once it
+// evaluates an event or an executing process against policy_rules.
+const (
+	EventActionLog     = "log"
+	EventActionNotify  = "notify"
+	EventActionBlocked = "blocked"
+	EventActionDeleted = "deleted"
+	EventActionKilled  = "killed"
+)
+
+// Event is a single System Policy Enforcement occurrence (USB, download,
+// desktop/config change, install, blocked execution, ...). Separate from the
+// existing Alert table on purpose — Alert stays 100% CPU/RAM/blacklist/
+// offline-recovery, unmodified from Phase 1.
+type Event struct {
+	ID        int64     `json:"id"`
+	AgentID   string    `json:"agent_id"`
+	Hostname  string    `json:"hostname,omitempty"`
+	Type      string    `json:"type"`
+	Metadata  string    `json:"metadata"`
+	Action    string    `json:"action"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// PolicyRuleAction values, validated in server/api.go.
+const (
+	PolicyActionLog    = "log"
+	PolicyActionNotify = "notify"
+	PolicyActionBlock  = "block"
+	PolicyActionDelete = "delete"
+	PolicyActionKill   = "kill"
+)
+
+// PolicyRule is one data-driven rule the Policy Engine (server/policy.go)
+// matches against. Empty string fields mean "any" for that dimension.
+type PolicyRule struct {
+	ID                int64     `json:"id"`
+	Name              string    `json:"name"`
+	EventType         string    `json:"event_type"`
+	CategoryID        *int64    `json:"category_id"`
+	FileExtension     string    `json:"file_extension"`
+	ExecutionLocation string    `json:"execution_location"`
+	DeviceGroup       string    `json:"device_group"`
+	Action            string    `json:"action"`
+	Enabled           bool      `json:"enabled"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type Alert struct {
@@ -352,7 +401,13 @@ func (db *DB) migrate() error {
 		created_at       TEXT NOT NULL,
 		updated_at       TEXT NOT NULL
 	);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_identity ON applications(exe_name, company);
+	-- Partial index: install-detected rows (Module 5) leave exe_name blank
+	-- since the Uninstall registry never exposes it, and dedup for those goes
+	-- through UpsertApplicationByProduct's explicit (product_name, company)
+	-- lookup instead — a plain unique index on (exe_name, company) would
+	-- wrongly collide multiple different products from the same company that
+	-- both have exe_name=''.
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_identity ON applications(exe_name, company) WHERE exe_name <> '';
 	CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 
 	CREATE TABLE IF NOT EXISTS app_sightings (
@@ -368,6 +423,31 @@ func (db *DB) migrate() error {
 		PRIMARY KEY (agent_id, application_id, path)
 	);
 	CREATE INDEX IF NOT EXISTS idx_sightings_app ON app_sightings(application_id);
+
+	CREATE TABLE IF NOT EXISTS events (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent_id   TEXT NOT NULL REFERENCES agents(id),
+		type       TEXT NOT NULL,
+		metadata   TEXT NOT NULL DEFAULT '{}',
+		action     TEXT NOT NULL DEFAULT 'log',
+		created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_events_agent_time ON events(agent_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_events_type       ON events(type, created_at);
+
+	CREATE TABLE IF NOT EXISTS policy_rules (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		name               TEXT NOT NULL,
+		event_type         TEXT NOT NULL DEFAULT '',
+		category_id        INTEGER REFERENCES categories(id),
+		file_extension     TEXT NOT NULL DEFAULT '',
+		execution_location TEXT NOT NULL DEFAULT '',
+		device_group       TEXT NOT NULL DEFAULT '',
+		action             TEXT NOT NULL DEFAULT 'log',
+		enabled            INTEGER NOT NULL DEFAULT 1,
+		created_at         TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_policy_rules_enabled ON policy_rules(enabled);
 	`)
 	if err != nil {
 		return err
@@ -377,6 +457,7 @@ func (db *DB) migrate() error {
 		{"agent_version", "TEXT NOT NULL DEFAULT ''"},
 		{"windows_version", "TEXT NOT NULL DEFAULT ''"},
 		{"disk_capacity_gb", "REAL NOT NULL DEFAULT 0"},
+		{"device_group", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("agents", col.name, col.decl); err != nil {
 			return fmt.Errorf("add column agents.%s: %w", col.name, err)
@@ -462,7 +543,7 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 	rows, err := db.Query(`
 		SELECT
 			a.id, a.hostname, a.ip, a.os, a.last_seen, a.mesh_id, a.status, a.created_at,
-			a.agent_version, a.windows_version, a.disk_capacity_gb,
+			a.agent_version, a.windows_version, a.disk_capacity_gb, a.device_group,
 			COALESCE((SELECT cpu  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
 			COALESCE((SELECT ram  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
 			COALESCE((SELECT name FROM processes WHERE agent_id = a.id ORDER BY recorded_at DESC, cpu DESC LIMIT 1), ''),
@@ -483,7 +564,7 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 		if err := rows.Scan(
 			&a.ID, &a.Hostname, &a.IP, &a.OS,
 			&lastSeen, &a.MeshID, &a.Status, &createdAt,
-			&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB,
+			&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB, &a.DeviceGroup,
 			&a.CPU, &a.RAM, &a.TopProcess,
 			&a.InstalledSoftwareCount, &a.RunningProcessCount,
 		); err != nil {
@@ -500,10 +581,10 @@ func (db *DB) GetAgentByID(id string) (*AgentWithMetrics, error) {
 	var a AgentWithMetrics
 	var lastSeen, createdAt string
 	err := db.QueryRow(
-		`SELECT id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb
+		`SELECT id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb, device_group
 		 FROM agents WHERE id = ?`, id,
 	).Scan(&a.ID, &a.Hostname, &a.IP, &a.OS, &lastSeen, &a.MeshID, &a.Status, &createdAt,
-		&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB)
+		&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB, &a.DeviceGroup)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -547,6 +628,23 @@ func (db *DB) UpdateAgentStatus(id, status string) error {
 func (db *DB) SetAgentMeshID(id, meshID string) error {
 	_, err := db.Exec(`UPDATE agents SET mesh_id = ? WHERE id = ?`, meshID, id)
 	return err
+}
+
+func (db *DB) SetAgentDeviceGroup(id, group string) error {
+	_, err := db.Exec(`UPDATE agents SET device_group = ? WHERE id = ?`, group, id)
+	return err
+}
+
+// GetAgentDeviceGroup is a lightweight lookup (no metrics/process subqueries,
+// unlike GetAgentByID) for the Policy Engine, called once per metrics cycle
+// per agent rather than the heavier full-agent query.
+func (db *DB) GetAgentDeviceGroup(id string) (string, error) {
+	var group string
+	err := db.QueryRow(`SELECT device_group FROM agents WHERE id = ?`, id).Scan(&group)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return group, err
 }
 
 func (db *DB) GetAllAgentIDs() ([]string, error) {
@@ -1012,10 +1110,16 @@ func (db *DB) UpsertApplication(exeName, company string, meta *AppMetadata) (int
 		productName, description, productVersion = meta.ProductName, meta.Description, meta.ProductVersion
 	}
 
+	// The conflict target must restate idx_applications_identity's partial
+	// predicate (WHERE exe_name <> '') verbatim — SQLite requires an exact
+	// match to resolve ON CONFLICT against a partial unique index, otherwise
+	// every insert here errors with "does not match any PRIMARY KEY or
+	// UNIQUE constraint" (caught via live testing against a real agent,
+	// which sends real exe names on every call to this function).
 	_, err := db.Exec(`
 		INSERT INTO applications (exe_name, company, product_name, description, product_version, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(exe_name, company) DO UPDATE SET
+		ON CONFLICT(exe_name, company) WHERE exe_name <> '' DO UPDATE SET
 			product_name    = CASE WHEN excluded.product_name    <> '' THEN excluded.product_name    ELSE applications.product_name    END,
 			description     = CASE WHEN excluded.description     <> '' THEN excluded.description     ELSE applications.description     END,
 			product_version = CASE WHEN excluded.product_version <> '' THEN excluded.product_version ELSE applications.product_version END,
@@ -1028,6 +1132,53 @@ func (db *DB) UpsertApplication(exeName, company string, meta *AppMetadata) (int
 	var id int64
 	err = db.QueryRow(`SELECT id FROM applications WHERE exe_name = ? AND company = ?`, exeName, company).Scan(&id)
 	return id, err
+}
+
+// UpsertApplicationByProduct is the Install Detection (Module 5) counterpart
+// to UpsertApplication: the Windows Uninstall registry only exposes
+// DisplayName/Publisher, never the primary executable name, so it can't use
+// the (exe_name, company) identity key. It looks up an existing catalog row
+// by (product_name, company) case-insensitively first — merging into an
+// install-detected row from an earlier install of the same product — and
+// only creates a new row (with exe_name left blank) if none exists. This is
+// a best-effort merge: a process-detected row for the same app (keyed by its
+// real exe_name) is not automatically unified with an install-detected row
+// for it — cross-source identity matching by product name alone is out of
+// scope for Phase 2 (documented limitation, not a bug).
+func (db *DB) UpsertApplicationByProduct(productName, company string, meta *AppMetadata) (int64, error) {
+	now := fmtTime(nowWIB())
+	var description, productVersion string
+	if meta != nil {
+		description, productVersion = meta.Description, meta.ProductVersion
+	}
+
+	var id int64
+	err := db.QueryRow(
+		`SELECT id FROM applications WHERE product_name = ? COLLATE NOCASE AND company = ? COLLATE NOCASE`,
+		productName, company,
+	).Scan(&id)
+	if err == nil {
+		_, err = db.Exec(`
+			UPDATE applications SET
+				description     = CASE WHEN ? <> '' THEN ? ELSE description     END,
+				product_version = CASE WHEN ? <> '' THEN ? ELSE product_version END,
+				updated_at      = ?
+			WHERE id = ?
+		`, description, description, productVersion, productVersion, now, id)
+		return id, err
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+
+	res, err := db.Exec(`
+		INSERT INTO applications (exe_name, company, product_name, description, product_version, status, created_at, updated_at)
+		VALUES ('', ?, ?, ?, ?, ?, ?, ?)
+	`, company, productName, description, productVersion, AppStatusPendingReview, now, now)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 // GetApplications lists the catalog, optionally filtered by status and/or category.
@@ -1145,6 +1296,28 @@ func (db *DB) UpdateApplicationStatus(id int64, status string, categoryID *int64
 
 // ─── App Sighting Queries ──────────────────────────────────────────────────
 
+// GetSightingApplicationID looks up which application a (agentID, path) pair
+// was already resolved to by an earlier sighting. Used by catalog.go to
+// avoid re-deriving identity from possibly-empty metadata on every cycle —
+// once a path has been linked to an application, later sightings of the
+// same path (even ones the agent didn't attach fresh metadata to — e.g. a
+// second chrome.exe process sharing chrome.exe's already-cached path) reuse
+// that link instead of risking a second, company-less catalog row.
+func (db *DB) GetSightingApplicationID(agentID, path string) (int64, bool, error) {
+	var appID int64
+	err := db.QueryRow(
+		`SELECT application_id FROM app_sightings WHERE agent_id = ? AND path = ?`,
+		agentID, path,
+	).Scan(&appID)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return appID, true, nil
+}
+
 // UpsertSighting records that applicationID was seen running at path on
 // agentID. size/createdAt/modifiedAt are only written on insert or when the
 // caller has fresh metadata (size > 0) — repeat sightings without metadata
@@ -1170,4 +1343,141 @@ func (db *DB) UpsertSighting(agentID string, applicationID int64, path string, s
 			file_modified_at  = CASE WHEN excluded.file_modified_at <> '' THEN excluded.file_modified_at ELSE app_sightings.file_modified_at END
 	`, agentID, applicationID, path, size, createdStr, modifiedStr, now, now)
 	return err
+}
+
+// ─── Event Queries ─────────────────────────────────────────────────────────
+
+func (db *DB) InsertEvent(agentID, eventType, metadataJSON, action string) (int64, error) {
+	res, err := db.Exec(
+		`INSERT INTO events (agent_id, type, metadata, action, created_at) VALUES (?, ?, ?, ?, ?)`,
+		agentID, eventType, metadataJSON, action, fmtTime(nowWIB()),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// GetEvents lists events across all agents, optionally filtered by agentID and/or type.
+func (db *DB) GetEvents(agentID, eventType string, limit int) ([]Event, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	query := `
+		SELECT e.id, e.agent_id, COALESCE(ag.hostname, ''), e.type, e.metadata, e.action, e.created_at
+		FROM events e
+		LEFT JOIN agents ag ON ag.id = e.agent_id
+		WHERE 1=1`
+	args := []interface{}{}
+	if agentID != "" {
+		query += ` AND e.agent_id = ?`
+		args = append(args, agentID)
+	}
+	if eventType != "" {
+		query += ` AND e.type = ?`
+		args = append(args, eventType)
+	}
+	query += ` ORDER BY e.created_at DESC, e.id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]Event, 0)
+	for rows.Next() {
+		var e Event
+		var createdAt string
+		if err := rows.Scan(&e.ID, &e.AgentID, &e.Hostname, &e.Type, &e.Metadata, &e.Action, &createdAt); err != nil {
+			return nil, err
+		}
+		e.CreatedAt = parseDBTime(createdAt)
+		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
+// ─── Policy Rule Queries ────────────────────────────────────────────────────
+
+func (db *DB) GetAllPolicyRules() ([]PolicyRule, error) {
+	rows, err := db.Query(`
+		SELECT id, name, event_type, category_id, file_extension, execution_location, device_group, action, enabled, created_at
+		FROM policy_rules ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]PolicyRule, 0)
+	for rows.Next() {
+		var r PolicyRule
+		var categoryID sql.NullInt64
+		var enabled int
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.Name, &r.EventType, &categoryID, &r.FileExtension,
+			&r.ExecutionLocation, &r.DeviceGroup, &r.Action, &enabled, &createdAt); err != nil {
+			return nil, err
+		}
+		if categoryID.Valid {
+			r.CategoryID = &categoryID.Int64
+		}
+		r.Enabled = enabled != 0
+		r.CreatedAt = parseDBTime(createdAt)
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// GetEnabledPolicyRules returns only enabled rules — what the Policy Engine
+// evaluates against. Kept separate from GetAllPolicyRules (which the
+// dashboard's rule-management panel uses) so the hot path never scans
+// disabled rows.
+func (db *DB) GetEnabledPolicyRules() ([]PolicyRule, error) {
+	all, err := db.GetAllPolicyRules()
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]PolicyRule, 0, len(all))
+	for _, r := range all {
+		if r.Enabled {
+			enabled = append(enabled, r)
+		}
+	}
+	return enabled, nil
+}
+
+func (db *DB) InsertPolicyRule(r *PolicyRule) (int64, error) {
+	res, err := db.Exec(`
+		INSERT INTO policy_rules (name, event_type, category_id, file_extension, execution_location, device_group, action, enabled, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.Name, r.EventType, r.CategoryID, r.FileExtension, r.ExecutionLocation, r.DeviceGroup, r.Action, boolToInt(r.Enabled), fmtTime(nowWIB()))
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (db *DB) UpdatePolicyRule(id int64, r *PolicyRule) error {
+	_, err := db.Exec(`
+		UPDATE policy_rules SET
+			name = ?, event_type = ?, category_id = ?, file_extension = ?,
+			execution_location = ?, device_group = ?, action = ?, enabled = ?
+		WHERE id = ?
+	`, r.Name, r.EventType, r.CategoryID, r.FileExtension, r.ExecutionLocation, r.DeviceGroup, r.Action, boolToInt(r.Enabled), id)
+	return err
+}
+
+func (db *DB) DeletePolicyRule(id int64) error {
+	_, err := db.Exec(`DELETE FROM policy_rules WHERE id = ?`, id)
+	return err
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

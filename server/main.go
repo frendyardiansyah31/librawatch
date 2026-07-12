@@ -250,6 +250,12 @@ func main() {
 	catalog := NewCatalog(db)
 	hub.catalog = catalog
 
+	policyEngine := NewPolicyEngine(db, hub)
+	hub.policyEngine = policyEngine
+
+	eventRecorder := NewEventRecorder(db, hub, policyEngine)
+	hub.events = eventRecorder
+
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()

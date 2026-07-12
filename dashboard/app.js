@@ -158,6 +158,9 @@ function showTab(name) {
     loadLogs();
   } else if (name === 'applications') {
     loadApplications();
+  } else if (name === 'events') {
+    loadEvents();
+    refreshTimer = setInterval(loadEvents, 15000);
   }
 }
 
@@ -178,14 +181,14 @@ async function loadAgents() {
   } catch (e) {
     console.error('loadAgents:', e);
     const tbody = document.getElementById('agents-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
   }
 }
 
 function renderAgents(agents) {
   const tbody = document.getElementById('agents-tbody');
   if (!agents.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">Belum ada agent yang terhubung</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Belum ada agent yang terhubung</td></tr>';
     return;
   }
 
@@ -205,6 +208,11 @@ function renderAgents(agents) {
       <td><span class="dot ${ag.status === 'online' ? 'online' : 'offline'}"></span></td>
       <td><strong>${esc(ag.hostname)}</strong></td>
       <td style="font-family:monospace;font-size:12px">${esc(ag.ip)}</td>
+      <td>
+        <input type="text" class="device-group-input" value="${esc(ag.device_group || '')}"
+          placeholder="—" onclick="event.stopPropagation()"
+          onchange="updateDeviceGroup('${esc(ag.id)}', this.value)">
+      </td>
       <td>${barHtml(ag.cpu)}</td>
       <td>${barHtml(ag.ram)}</td>
       <td class="proc-name" title="${esc(ag.top_process)}">${esc(ag.top_process || '—')}</td>
@@ -256,7 +264,7 @@ function makeDetailRow(id) {
   const tr = document.createElement('tr');
   tr.className = 'detail-row';
   tr.id = 'detail-' + id;
-  tr.innerHTML = `<td colspan="8"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
+  tr.innerHTML = `<td colspan="9"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
   return tr;
 }
 
@@ -274,11 +282,26 @@ function buildDeviceProfile(ag) {
   </table>`;
 }
 
+function buildEventList(events) {
+  if (!events || !events.length) return '<p class="no-data">Belum ada event tercatat</p>';
+  const rows = events.slice(0, 10).map(e => `
+    <tr>
+      <td style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtTime(e.created_at)}</td>
+      <td>${esc(eventTypeLabel(e.type))}</td>
+      <td><span class="badge badge-${e.action}">${esc(e.action)}</span></td>
+    </tr>`).join('');
+  return `<table class="device-profile-table">
+    <thead><tr><th>Waktu</th><th>Tipe</th><th>Aksi</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
 async function loadAgentDetail(id, tr) {
   try {
-    const [procs, metrics] = await Promise.all([
+    const [procs, metrics, events] = await Promise.all([
       api('GET', `/agents/${id}/processes`),
       api('GET', `/agents/${id}/metrics`),
+      api('GET', `/agents/${id}/events?limit=10`).catch(() => []),
     ]);
     const ag = allAgents.find(a => a.id === id);
     tr.querySelector('.detail-content').innerHTML = `
@@ -292,11 +315,23 @@ async function loadAgentDetail(id, tr) {
         <div>
           <h4>Proses Aktif (${(procs||[]).length})</h4>
           ${buildProcTable(procs, id)}
+          <h4 style="margin-top:14px">Event Terkini</h4>
+          ${buildEventList(events)}
         </div>
       </div>`;
   } catch (e) {
     tr.querySelector('.detail-content').innerHTML =
       `<p class="no-data" style="color:var(--red)">${esc(e.message)}</p>`;
+  }
+}
+
+async function updateDeviceGroup(agentID, group) {
+  try {
+    await api('PATCH', `/agents/${agentID}`, { device_group: group });
+    const ag = allAgents.find(a => a.id === agentID);
+    if (ag) ag.device_group = group;
+  } catch (e) {
+    alert('Gagal update device group: ' + e.message);
   }
 }
 
@@ -808,6 +843,157 @@ async function updateApplication(id, categoryValue, statusValue) {
   } catch (e) {
     alert('Gagal update aplikasi: ' + e.message);
     loadApplications();
+  }
+}
+
+// ── Events Tab (Phase 2 — Module 7 Event Timeline) ───────────────────────────
+let eventFilterType = '';
+
+const EVENT_TYPE_LABEL = {
+  usb_inserted: 'USB Terpasang', usb_removed: 'USB Dilepas',
+  download_created: 'File Baru', download_deleted: 'File Dihapus',
+  wallpaper_changed: 'Wallpaper Diubah', theme_changed: 'Tema Diubah',
+  config_changed: 'Konfigurasi Berubah', software_installed: 'Software Terinstall',
+  software_removed: 'Software Dihapus', software_updated: 'Software Diperbarui',
+  exec_policy: 'Kebijakan Eksekusi',
+};
+function eventTypeLabel(type) { return EVENT_TYPE_LABEL[type] || type; }
+
+async function loadEvents() {
+  const tbody = document.getElementById('events-tbody');
+  try {
+    const qs = eventFilterType ? `?type=${encodeURIComponent(eventFilterType)}&limit=200` : '?limit=200';
+    const events = await api('GET', '/events' + qs);
+    renderEvents(events || []);
+  } catch (e) {
+    console.error('loadEvents:', e);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function setEventFilter(type) {
+  eventFilterType = type;
+  document.querySelectorAll('#event-filter-tabs .inner-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.type === type);
+  });
+  loadEvents();
+}
+
+function renderEvents(events) {
+  const tbody = document.getElementById('events-tbody');
+  if (!events.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">Belum ada event pada filter ini</td></tr>';
+    return;
+  }
+  tbody.innerHTML = events.map(e => {
+    let detail = '';
+    try { detail = JSON.stringify(JSON.parse(e.metadata)); } catch (_) { detail = e.metadata || ''; }
+    return `
+    <tr>
+      <td style="font-size:12px;color:var(--muted);white-space:nowrap">${fmtTime(e.created_at)}</td>
+      <td>${esc(e.hostname || e.agent_id)}</td>
+      <td>${esc(eventTypeLabel(e.type))}</td>
+      <td class="proc-name" title="${esc(detail)}">${esc(detail)}</td>
+      <td><span class="badge badge-${e.action}">${esc(e.action)}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Policy Rules Modal (Phase 2 — Module 8 Policy Engine) ────────────────────
+
+async function openPolicyRules() {
+  document.getElementById('modal-policy-rules').classList.add('open');
+  if (!allCategories.length) {
+    try { allCategories = await api('GET', '/categories') || []; } catch (_) { /* ignore */ }
+  }
+  const catSelect = document.getElementById('pr-category');
+  catSelect.innerHTML = '<option value="">— Semua kategori —</option>' +
+    allCategories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  loadPolicyRules();
+}
+
+function closePolicyRules(e) {
+  if (e instanceof Event && e.target !== document.getElementById('modal-policy-rules')) return;
+  document.getElementById('modal-policy-rules').classList.remove('open');
+}
+
+async function loadPolicyRules() {
+  const tbody = document.getElementById('policy-rules-tbody');
+  try {
+    const rules = await api('GET', '/policy-rules');
+    renderPolicyRules(rules || []);
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="empty" style="color:#dc2626">${esc(e.message)}</td></tr>`;
+  }
+}
+
+function renderPolicyRules(rules) {
+  const tbody = document.getElementById('policy-rules-tbody');
+  if (!rules.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Belum ada policy rule</td></tr>';
+    return;
+  }
+  const catName = id => (allCategories.find(c => c.id === id) || {}).name || '—';
+  tbody.innerHTML = rules.map(r => `
+    <tr>
+      <td>${esc(r.name)}</td>
+      <td>${esc(r.event_type || '—')}</td>
+      <td>${r.category_id ? esc(catName(r.category_id)) : '—'}</td>
+      <td>${esc(r.file_extension || '—')}</td>
+      <td>${esc(r.execution_location || '—')}</td>
+      <td>${esc(r.device_group || '—')}</td>
+      <td><span class="badge badge-${r.action}">${esc(r.action)}</span></td>
+      <td>
+        <input type="checkbox" ${r.enabled ? 'checked' : ''}
+          onchange="togglePolicyRuleEnabled(${r.id}, this.checked, ${JSON.stringify(r).replace(/"/g,'&quot;')})">
+      </td>
+      <td><button class="btn-sm" onclick="deletePolicyRule(${r.id})">Hapus</button></td>
+    </tr>`).join('');
+}
+
+async function createPolicyRule() {
+  const name = document.getElementById('pr-name').value.trim();
+  if (!name) { alert('Nama rule wajib diisi'); return; }
+  const categoryVal = document.getElementById('pr-category').value;
+  const body = {
+    name,
+    event_type: document.getElementById('pr-event-type').value.trim(),
+    category_id: categoryVal ? Number(categoryVal) : null,
+    file_extension: document.getElementById('pr-extension').value.trim(),
+    execution_location: document.getElementById('pr-location').value.trim(),
+    device_group: document.getElementById('pr-device-group').value.trim(),
+    action: document.getElementById('pr-action').value,
+    enabled: true,
+  };
+  try {
+    await api('POST', '/policy-rules', body);
+    document.getElementById('pr-name').value = '';
+    document.getElementById('pr-event-type').value = '';
+    document.getElementById('pr-extension').value = '';
+    document.getElementById('pr-location').value = '';
+    document.getElementById('pr-device-group').value = '';
+    loadPolicyRules();
+  } catch (e) {
+    alert('Gagal tambah rule: ' + e.message);
+  }
+}
+
+async function togglePolicyRuleEnabled(id, enabled, rule) {
+  try {
+    await api('PATCH', `/policy-rules/${id}`, { ...rule, enabled });
+  } catch (e) {
+    alert('Gagal update rule: ' + e.message);
+    loadPolicyRules();
+  }
+}
+
+async function deletePolicyRule(id) {
+  if (!confirm('Hapus policy rule ini?')) return;
+  try {
+    await api('DELETE', `/policy-rules/${id}`);
+    loadPolicyRules();
+  } catch (e) {
+    alert('Gagal hapus rule: ' + e.message);
   }
 }
 

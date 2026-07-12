@@ -6,14 +6,12 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
-
-	"github.com/gorilla/websocket"
 )
 
 // handleInstallSSH installs OpenSSH Server on Windows 11/10 and restricts
 // inbound SSH to the admin IP sent in the message.
 // Steps streamed back as log lines, final status sent as ssh_result.
-func handleInstallSSH(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+func handleInstallSSH(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	adminIP, _ := msg["args"].(string) // admin IP passed via "args" field (optional)
 
@@ -27,7 +25,7 @@ func handleInstallSSH(conn *websocket.Conn, agentID string, msg map[string]inter
 			"job_id":   jobID,
 			"output":   line,
 		})
-		_ = conn.WriteMessage(websocket.TextMessage, resp)
+		wsSend(resp)
 	}
 
 	sendResult := func(status, output string) {
@@ -38,9 +36,7 @@ func handleInstallSSH(conn *websocket.Conn, agentID string, msg map[string]inter
 			"status":   status,
 			"output":   output,
 		})
-		if err := conn.WriteMessage(websocket.TextMessage, resp); err != nil {
-			logMsg("ERROR", "InstallSSH send result: %v", err)
-		}
+		wsSend(resp)
 	}
 
 	steps := []struct {

@@ -185,6 +185,26 @@ func (a *Alerter) fire(agentID, alertType, message string, settings map[string]s
 	go a.sendEmail(message, settings)
 }
 
+// NotifyEvent sends a Phase 2 system-policy notification (USB, blocked
+// execution, software install, desktop/config change, ...) through the
+// exact same Telegram/email plumbing fire() already uses above — reusing
+// sendTelegram/sendEmail instead of building a second notification path
+// (Module 9). Unlike fire(), it does NOT touch the alerts table or any
+// cooldown/consecutive-count state: those stay CPU/RAM/blacklist/offline-
+// recovery only, exactly as they were before Phase 2. Callers (server/
+// events.go, server/policy.go) are responsible for their own dedup —
+// Phase 2 events aren't threshold-based, so the cooldown model above
+// doesn't apply to them.
+func (a *Alerter) NotifyEvent(message string) {
+	settings, err := a.db.GetAllSettings()
+	if err != nil {
+		slog.Error("notify event: get settings", "error", err)
+		return
+	}
+	go a.sendTelegram(message, settings["telegram_token"], settings["telegram_chat_id"])
+	go a.sendEmail(message, settings)
+}
+
 func (a *Alerter) sendTelegram(message, token, chatID string) {
 	if token == "" || chatID == "" {
 		return
@@ -215,7 +235,7 @@ func (a *Alerter) sendTelegram(message, token, chatID string) {
 
 func buildDialer(settings map[string]string) (*gomail.Dialer, string, string, bool) {
 	host := settings["smtp_host"]
-	to   := settings["smtp_to"]
+	to := settings["smtp_to"]
 	user := settings["smtp_user"]
 	pass := settings["smtp_pass"]
 	port := parseIntSetting(settings["smtp_port"], 587)
@@ -253,7 +273,7 @@ func (a *Alerter) SendTestTelegram() error {
 	if err != nil {
 		return err
 	}
-	token  := settings["telegram_token"]
+	token := settings["telegram_token"]
 	chatID := settings["telegram_chat_id"]
 	if token == "" || chatID == "" {
 		return fmt.Errorf("Telegram belum dikonfigurasi (token/chat_id kosong)")

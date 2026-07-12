@@ -7,6 +7,7 @@ auth:
   admin_cidrs: []       # contoh: ["10.5.39.88/32"] — batasi dashboard ke IP admin saja
   admin_username: "admin"
   admin_password: "admin123"
+  mcp_token: "834e2a32c55aac492dc466733e18339a658edf95b35bf1abf71a775a2f2c7fc5"  # bearer token untuk /mcp (OpenClaw)
 
 database:
   path: "./data/library.db"
@@ -35,6 +36,9 @@ email:
 
 meshcentral:
   url: "http://192.168.1.10:4430"
+
+deepfreeze:
+  password: "Library2025!"
 
 uploads:
   path: "./uploads"

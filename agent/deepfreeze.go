@@ -7,13 +7,11 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
-
-	"github.com/gorilla/websocket"
 )
 
 const dfcPath = `C:\Windows\SysWOW64\DFC.exe`
 
-func handleDeepFreeze(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+func handleDeepFreeze(agentID string, msg map[string]interface{}) {
 	action, _ := msg["action"].(string)
 	password, _ := msg["password"].(string)
 	jobID, _ := msg["job_id"].(string)
@@ -28,9 +26,7 @@ func handleDeepFreeze(conn *websocket.Conn, agentID string, msg map[string]inter
 			"status":   status,
 			"output":   output,
 		})
-		if err := conn.WriteMessage(websocket.TextMessage, resp); err != nil {
-			logMsg("ERROR", "DeepFreeze: send result failed: %v", err)
-		}
+		wsSend(resp)
 	}
 
 	if _, err := os.Stat(dfcPath); err != nil {

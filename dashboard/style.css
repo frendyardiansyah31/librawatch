@@ -388,6 +388,21 @@ select.badge {
   -webkit-appearance: none; font-family: inherit;
 }
 
+/* Phase 2 — event actions (past tense: what happened) and policy rule
+   actions (present tense: what a rule says to do) share most colors. */
+.badge-log      { background: #f1f5f9; color: #475569; }
+.badge-notify   { background: #dbeafe; color: #1e40af; }
+.badge-deleted, .badge-delete { background: #fee2e2; color: #991b1b; }
+.badge-killed,  .badge-kill   { background: #7f1d1d; color: #fff; }
+.badge-block    { background: #fee2e2; color: #991b1b; }
+
+.device-group-input {
+  width: 100px; padding: 3px 6px; font-size: 12px;
+  border: 1px solid transparent; border-radius: 4px; background: transparent;
+}
+.device-group-input:hover  { border-color: var(--border); }
+.device-group-input:focus  { border-color: var(--blue); background: #fff; }
+
 .job-payload { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .job-results { display: none; border-top: 1px solid var(--border); }

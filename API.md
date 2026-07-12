@@ -68,6 +68,74 @@ blacklist teks yang lama (`settings.blacklist`)** — status `blocked` di katalo
 untuk pencatatan/review di Phase 1, belum otomatis memicu kill (lihat rencana Policy
 Engine di fase berikutnya).
 
+### Events (Phase 2 — System Policy Enforcement)
+| Method | Path | Fungsi |
+|---|---|---|
+| GET | `/api/events` | List event lintas semua PC (query `agent_id`, `type`, `limit` default 100) |
+| GET | `/api/agents/:id/events` | Event timeline 1 PC (query `type`, `limit` default 50) |
+
+Event types: `usb_inserted`, `usb_removed` (Module 1), `download_created`, `download_deleted`
+(Module 2), `wallpaper_changed`, `theme_changed` (Module 3), `config_changed` (Module 4 — Run/
+RunOnce registry + Scheduled Tasks), `software_installed`, `software_removed`,
+`software_updated` (Module 5 — otomatis masuk ke Application Catalog Phase 1 yang sama via
+`UpsertApplicationByProduct`, tidak bikin record duplikat), `exec_policy` (Module 6 — proses
+yang jalan dari lokasi terpantau: Downloads/Desktop/Temp/USB).
+
+Setiap event dievaluasi lewat Policy Engine (`server/policy.go`) terhadap tabel
+`policy_rules` sebelum disimpan — field `action` pada tiap event (`log`/`notify`/`blocked`/
+`deleted`/`killed`) adalah hasil keputusan itu, bukan hardcoded.
+
+### Policy Rules (Phase 2 — Module 8 Policy Engine)
+| Method | Path | Fungsi |
+|---|---|---|
+| GET | `/api/policy-rules` | List semua rule (aktif maupun nonaktif) |
+| POST | `/api/policy-rules` | Buat rule baru |
+| PATCH | `/api/policy-rules/:id` | Update rule |
+| DELETE | `/api/policy-rules/:id` | Hapus rule |
+
+Body rule: `{name, event_type, category_id, file_extension, execution_location, device_group,
+action, enabled}` — semua field filter (`event_type`, `category_id`, `file_extension`,
+`execution_location`, `device_group`) opsional, kosong berarti "berlaku untuk semua". `action`
+wajib salah satu dari `log`\|`notify`\|`block`\|`delete`\|`kill`. Matching: rule dengan filter
+paling spesifik (field non-kosong terbanyak) yang menang kalau ada beberapa rule cocok
+sekaligus; kalau tidak ada rule cocok, default `log`.
+
+**Catatan enforcement per action**: `kill` benar-benar mematikan proses (reuse mekanisme
+kill yang sama dengan tombol kill manual/Phase 1 auto-kill) — hanya berlaku untuk Module 6
+(proses berjalan dari lokasi terpantau). `delete` benar-benar menghapus file — hanya berlaku
+untuk Module 2 (file di Downloads/Desktop/Documents). `block` untuk USB/desktop/config
+**dicatat saja, belum benar-benar memblokir** (USB device tidak dinonaktifkan, wallpaper/
+config tidak di-restore otomatis) — sesuai scope Phase 2 yang eksplisit menunda enforcement
+level itu. `notify` mengirim Telegram/email lewat `Alerter.NotifyEvent` (`server/alert.go`) —
+infrastruktur yang sama dipakai alert CPU/RAM/blacklist/offline, bukan modul notifikasi baru.
+
+**Catatan hasil live-testing** (dijalankan end-to-end di mesin Windows asli, bukan simulasi):
+tiga bug ditemukan dan diperbaiki sebelum Phase 2 dianggap selesai —
+1. `agent_version`/`windows_version`/`disk_capacity_gb` (sebenarnya field Phase 1) ternyata
+   tidak pernah sampai ke `agents` table karena `IncomingMessage` di `server/hub.go` belum
+   punya field-nya — sudah diperbaiki, tervalidasi lewat agent asli.
+2. Identity resolution katalog aplikasi (`Catalog.Observe`) bisa terpecah jadi 2 row untuk
+   app yang sama (mis. banyak proses `chrome.exe`) karena metadata (`company`) cuma dikirim
+   sekali per path per sesi agent — proses lain yang share path yang sama kirim `company`
+   kosong dan bikin row baru. Diperbaiki dengan resolve identity lewat `app_sightings` yang
+   sudah ada dulu, baru fallback ke `UpsertApplication` kalau path benar-benar baru.
+3. `PolicyEngine.EvaluateProcesses` (Module 6) sempat manggil `hub.KillProcess` **synchronous**
+   dari goroutine `readPump` koneksi yang sama — deadlock karena balasan `kill_result` dari
+   agent tidak pernah kebaca (proses tetap ke-kill via `taskkill`, tapi event tercatat
+   `action=log` bukan `killed`). Diperbaiki jadi `go p.actOnExecution(...)`, sama seperti pola
+   `Alerter.autoKill` yang sudah ada.
+
+Module 5 (Install Detection) tidak bisa di-live-test penuh di sesi ini karena butuh akses
+tulis ke `HKLM\...\Uninstall` yang perlu elevasi admin (di produksi agent jalan sebagai
+SYSTEM lewat Task Scheduler sehingga punya akses ini) — kode-nya pakai pola
+`RegNotifyChangeKeyValue` yang identik dengan Module 3/4 yang sudah tervalidasi.
+
+### Agents — device group (Phase 2)
+`PATCH /api/agents/:id` (endpoint yang sudah ada) sekarang juga menerima field opsional
+`device_group` (string bebas, dipakai sebagai salah satu dimensi matching di `policy_rules`)
+selain `mesh_id` yang sudah ada — keduanya sekarang pakai pointer JSON supaya bisa update
+salah satu tanpa mereset yang lain.
+
 ### Audit
 | Method | Path | Fungsi |
 |---|---|---|

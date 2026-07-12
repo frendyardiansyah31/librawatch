@@ -40,21 +40,42 @@ func (c *Catalog) Observe(agentID string, procs []Process) {
 	}
 }
 
+// observeOne resolves p.Path to an application ID and records a sighting.
+//
+// Identity (exe_name + company) only needs to be resolved once per
+// (agent, path): the agent only attaches metadata (including Company) the
+// first time it sees a path each session (agent/appmeta.go), so on every
+// later cycle — and for every other PID that happens to share that same
+// path, e.g. a second chrome.exe process — p.Company arrives empty. Calling
+// UpsertApplication with an empty company on those cycles would look up (or
+// create) the identity (p.Name, "") instead of the real
+// (p.Name, "Google LLC") row, fragmenting one app into two catalog rows.
+// Checking app_sightings first avoids that: once a path is linked to an
+// application, every later sighting of that exact path reuses the link
+// directly instead of re-deriving identity from data that may no longer be
+// present in this cycle's message.
 func (c *Catalog) observeOne(agentID string, p Process) {
-	var meta *AppMetadata
-	if p.ProductName != "" || p.Company != "" || p.Description != "" || p.ProductVersion != "" {
-		meta = &AppMetadata{
-			ProductName:    p.ProductName,
-			Company:        p.Company,
-			Description:    p.Description,
-			ProductVersion: p.ProductVersion,
-		}
+	appID, found, err := c.db.GetSightingApplicationID(agentID, p.Path)
+	if err != nil {
+		slog.Error("catalog: lookup sighting failed", "agent_id", agentID, "path", p.Path, "error", err)
+		return
 	}
 
-	appID, err := c.db.UpsertApplication(p.Name, p.Company, meta)
-	if err != nil {
-		slog.Error("catalog: upsert application failed", "agent_id", agentID, "exe", p.Name, "error", err)
-		return
+	if !found {
+		var meta *AppMetadata
+		if p.ProductName != "" || p.Company != "" || p.Description != "" || p.ProductVersion != "" {
+			meta = &AppMetadata{
+				ProductName:    p.ProductName,
+				Company:        p.Company,
+				Description:    p.Description,
+				ProductVersion: p.ProductVersion,
+			}
+		}
+		appID, err = c.db.UpsertApplication(p.Name, p.Company, meta)
+		if err != nil {
+			slog.Error("catalog: upsert application failed", "agent_id", agentID, "exe", p.Name, "error", err)
+			return
+		}
 	}
 
 	fileCreated := parseDBTime(p.FileCreatedAt)

@@ -6,11 +6,9 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
-
-	"github.com/gorilla/websocket"
 )
 
-func executeCommand(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+func executeCommand(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	payload, _ := msg["payload"].(string)
 
@@ -33,10 +31,10 @@ func executeCommand(conn *websocket.Conn, agentID string, msg map[string]interfa
 		}
 	}
 
-	sendExecResult(conn, agentID, jobID, status, output)
+	sendExecResult(agentID, jobID, status, output)
 }
 
-func deployFile(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+func deployFile(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	filename, _ := msg["filename"].(string)
 	args, _ := msg["args"].(string)
@@ -45,7 +43,7 @@ func deployFile(conn *websocket.Conn, agentID string, msg map[string]interface{}
 
 	localPath, err := downloadFile(filename)
 	if err != nil {
-		sendExecResult(conn, agentID, jobID, "error", "download failed: "+err.Error())
+		sendExecResult(agentID, jobID, "error", "download failed: "+err.Error())
 		return
 	}
 
@@ -80,10 +78,10 @@ func deployFile(conn *websocket.Conn, agentID string, msg map[string]interface{}
 		}
 	}
 
-	sendExecResult(conn, agentID, jobID, status, output)
+	sendExecResult(agentID, jobID, status, output)
 }
 
-func sendExecResult(conn *websocket.Conn, agentID, jobID, status, output string) {
+func sendExecResult(agentID, jobID, status, output string) {
 	if len(output) > 4096 {
 		output = output[:4096] + "...[truncated]"
 	}
@@ -95,7 +93,5 @@ func sendExecResult(conn *websocket.Conn, agentID, jobID, status, output string)
 		"output":   output,
 	}
 	data, _ := json.Marshal(msg)
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		logMsg("ERROR", "Send exec result: %v", err)
-	}
+	wsSend(data)
 }

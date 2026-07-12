@@ -61,6 +61,9 @@
       <button class="tab-btn" data-tab="applications" onclick="showTab('applications')">
         Applications
       </button>
+      <button class="tab-btn" data-tab="events" onclick="showTab('events')">
+        Events
+      </button>
     </nav>
 
     <main>
@@ -73,6 +76,7 @@
                 <th style="width: 26px"></th>
                 <th>Hostname</th>
                 <th>IP</th>
+                <th>Group</th>
                 <th>CPU</th>
                 <th>RAM</th>
                 <th>Proses Teratas</th>
@@ -82,7 +86,7 @@
             </thead>
             <tbody id="agents-tbody">
               <tr>
-                <td colspan="8" class="empty">Memuat data…</td>
+                <td colspan="9" class="empty">Memuat data…</td>
               </tr>
             </tbody>
           </table>
@@ -313,7 +317,105 @@
           </div>
         </div>
       </div>
+
+      <!-- ── Events (Phase 2 — System Policy Enforcement) ───────────────────── -->
+      <div id="tab-events" class="tab-content">
+        <div class="panel">
+          <div class="inner-tabs" id="event-filter-tabs">
+            <button class="inner-tab active" data-type="" onclick="setEventFilter('')">Semua</button>
+            <button class="inner-tab" data-type="usb_inserted" onclick="setEventFilter('usb_inserted')">USB</button>
+            <button class="inner-tab" data-type="download_created" onclick="setEventFilter('download_created')">Download</button>
+            <button class="inner-tab" data-type="wallpaper_changed" onclick="setEventFilter('wallpaper_changed')">Desktop</button>
+            <button class="inner-tab" data-type="config_changed" onclick="setEventFilter('config_changed')">Konfigurasi</button>
+            <button class="inner-tab" data-type="software_installed" onclick="setEventFilter('software_installed')">Instalasi</button>
+            <button class="inner-tab" data-type="exec_policy" onclick="setEventFilter('exec_policy')">Eksekusi</button>
+            <button class="btn-sm" style="margin-left:auto" onclick="openPolicyRules()">Kelola Policy Rules</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Waktu</th>
+                  <th>PC</th>
+                  <th>Tipe</th>
+                  <th>Detail</th>
+                  <th>Aksi</th>
+                </tr>
+              </thead>
+              <tbody id="events-tbody">
+                <tr><td colspan="5" class="empty">Memuat data…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </main>
+
+    <!-- ── Policy Rules Modal (Phase 2 — Module 8) ───────────────────────────── -->
+    <div id="modal-policy-rules" class="modal-overlay" onclick="closePolicyRules(event)">
+      <div class="modal">
+        <div class="modal-hdr">
+          <h2>Policy Rules</h2>
+          <button class="btn-close" onclick="closePolicyRules()">✕</button>
+        </div>
+        <div class="modal-body">
+          <section>
+            <h3>Tambah Rule Baru</h3>
+            <div class="form-row">
+              <label>Nama</label>
+              <input id="pr-name" type="text" placeholder="Blokir exe dari Downloads" />
+            </div>
+            <div class="form-row">
+              <label>Event Type (kosong = semua)</label>
+              <input id="pr-event-type" type="text" placeholder="usb_inserted, download_created, ..." />
+            </div>
+            <div class="form-row">
+              <label>Kategori (kosong = semua)</label>
+              <select id="pr-category"><option value="">— Semua kategori —</option></select>
+            </div>
+            <div class="form-row">
+              <label>Ekstensi File (kosong = semua)</label>
+              <input id="pr-extension" type="text" placeholder="exe" />
+            </div>
+            <div class="form-row">
+              <label>Lokasi Eksekusi (kosong = semua)</label>
+              <input id="pr-location" type="text" placeholder="downloads, desktop, temp, usb" />
+            </div>
+            <div class="form-row">
+              <label>Device Group (kosong = semua)</label>
+              <input id="pr-device-group" type="text" placeholder="Lantai 1, Lantai 2, ..." />
+            </div>
+            <div class="form-row">
+              <label>Aksi</label>
+              <select id="pr-action">
+                <option value="log">Log saja</option>
+                <option value="notify">Notify (Telegram/Email)</option>
+                <option value="block">Block (dicatat)</option>
+                <option value="delete">Delete file</option>
+                <option value="kill">Kill process</option>
+              </select>
+            </div>
+            <button class="btn-outline" onclick="createPolicyRule()">Tambah Rule</button>
+          </section>
+          <section>
+            <h3>Rule Aktif</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Nama</th><th>Event</th><th>Kategori</th><th>Ekstensi</th>
+                    <th>Lokasi</th><th>Group</th><th>Aksi</th><th>Aktif</th><th></th>
+                  </tr>
+                </thead>
+                <tbody id="policy-rules-tbody">
+                  <tr><td colspan="9" class="empty">Memuat…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
 
     <!-- ── Settings Modal ────────────────────────────────────────────────────── -->
     <div

@@ -29,6 +29,14 @@ var validAppStatuses = map[string]bool{
 	AppStatusIgnored:       true,
 }
 
+var validPolicyActions = map[string]bool{
+	PolicyActionLog:    true,
+	PolicyActionNotify: true,
+	PolicyActionBlock:  true,
+	PolicyActionDelete: true,
+	PolicyActionKill:   true,
+}
+
 // wingetIDRe matches valid winget package IDs: Publisher.AppName style.
 // Allows letters, digits, dots, dashes, underscores, plus signs.
 var wingetIDRe = regexp.MustCompile(`^[A-Za-z0-9][\w.\-+]*$`)
@@ -150,15 +158,26 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 
 	api.PATCH("/agents/:id", func(c *gin.Context) {
 		var req struct {
-			MeshID string `json:"mesh_id"`
+			MeshID      *string `json:"mesh_id"`
+			DeviceGroup *string `json:"device_group"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := db.SetAgentMeshID(c.Param("id"), req.MeshID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+		agentID := c.Param("id")
+		if req.MeshID != nil {
+			if err := db.SetAgentMeshID(agentID, *req.MeshID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		if req.DeviceGroup != nil {
+			if err := db.SetAgentDeviceGroup(agentID, *req.DeviceGroup); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			db.InsertAuditLog("update_device_group", agentID, *req.DeviceGroup, c.ClientIP())
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
@@ -265,6 +284,104 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			return
 		}
 		c.JSON(http.StatusOK, categories)
+	})
+
+	// ── Events (Phase 2 — Module 7 Event Timeline) ─────────────────────────
+
+	api.GET("/events", func(c *gin.Context) {
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+		events, err := db.GetEvents(c.Query("agent_id"), c.Query("type"), limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, events)
+	})
+
+	api.GET("/agents/:id/events", func(c *gin.Context) {
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		events, err := db.GetEvents(c.Param("id"), c.Query("type"), limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, events)
+	})
+
+	// ── Policy Rules (Phase 2 — Module 8 Policy Engine) ────────────────────
+
+	api.GET("/policy-rules", func(c *gin.Context) {
+		rules, err := db.GetAllPolicyRules()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, rules)
+	})
+
+	api.POST("/policy-rules", func(c *gin.Context) {
+		var rule PolicyRule
+		if err := c.ShouldBindJSON(&rule); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if rule.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			return
+		}
+		if !validPolicyActions[rule.Action] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "action must be one of log, notify, block, delete, kill"})
+			return
+		}
+		id, err := db.InsertPolicyRule(&rule)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		db.InsertAuditLog("create_policy_rule", strconv.FormatInt(id, 10), rule.Name, c.ClientIP())
+		rule.ID = id
+		c.JSON(http.StatusOK, rule)
+	})
+
+	api.PATCH("/policy-rules/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule id"})
+			return
+		}
+		var rule PolicyRule
+		if err := c.ShouldBindJSON(&rule); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if rule.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			return
+		}
+		if !validPolicyActions[rule.Action] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "action must be one of log, notify, block, delete, kill"})
+			return
+		}
+		if err := db.UpdatePolicyRule(id, &rule); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		db.InsertAuditLog("update_policy_rule", strconv.FormatInt(id, 10), rule.Name, c.ClientIP())
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	api.DELETE("/policy-rules/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule id"})
+			return
+		}
+		if err := db.DeletePolicyRule(id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		db.InsertAuditLog("delete_policy_rule", strconv.FormatInt(id, 10), "", c.ClientIP())
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
 	// ── Settings ─────────────────────────────────────────────────────────

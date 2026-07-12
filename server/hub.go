@@ -34,10 +34,17 @@ type IncomingMessage struct {
 	CPU       float64   `json:"cpu"`
 	RAM       float64   `json:"ram"`
 	Processes []Process `json:"processes"`
+	// device profile fields (Phase 1 — sent on every metrics message)
+	AgentVersion   string  `json:"agent_version"`
+	WindowsVersion string  `json:"windows_version"`
+	DiskCapacityGB float64 `json:"disk_capacity_gb"`
 	// exec_result / log_result fields
 	JobID  string `json:"job_id"`
 	Status string `json:"status"`
 	Output string `json:"output"`
+	// event fields (Phase 2 — usb_inserted, download_created, etc; see server/events.go)
+	EventType string                 `json:"event_type"`
+	Metadata  map[string]interface{} `json:"metadata"`
 }
 
 // OutgoingMessage covers all server→agent message types.
@@ -52,6 +59,7 @@ type OutgoingMessage struct {
 	Password string `json:"password,omitempty"`  // deepfreeze: optional DF password
 	PID      int    `json:"pid,omitempty"`       // kill_process: target PID
 	ProcName string `json:"proc_name,omitempty"` // kill_process: fallback by name
+	Path     string `json:"path,omitempty"`      // delete_file: absolute path to remove
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
@@ -128,6 +136,8 @@ type Hub struct {
 	deployer      *Deployer
 	batcher       *MetricsBatcher
 	catalog       *Catalog
+	policyEngine  *PolicyEngine
+	events        *EventRecorder
 	authToken     string   // if non-empty, WebSocket clients must provide ?token=
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
 	logWaiters    sync.Map // agentID → chan string, pending log relay
@@ -223,7 +233,31 @@ func (h *Hub) handleMessage(c *Client, data []byte) {
 		h.handleLogResult(c, &msg)
 	case "kill_result":
 		h.handleKillResult(c, &msg)
+	case "event":
+		h.handleEvent(c, &msg)
+	case "delete_file_result":
+		slog.Info("delete_file result", "agent_id", msg.AgentID, "output", msg.Output)
 	}
+}
+
+// handleEvent routes a Phase 2 system-policy event (USB, download, desktop/
+// config change, install detection — see agent/events.go and the 5 watcher
+// files) to the EventRecorder. Hostname is looked up from the DB rather than
+// requiring every event message to carry it, since the agent already
+// registers hostname on its first metrics message.
+func (h *Hub) handleEvent(c *Client, msg *IncomingMessage) {
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = msg.AgentID
+	}
+	if agentID == "" || msg.EventType == "" || h.events == nil {
+		return
+	}
+	hostname := agentID
+	if agent, err := h.db.GetAgentByID(agentID); err == nil && agent != nil {
+		hostname = agent.Hostname
+	}
+	h.events.Record(agentID, hostname, msg.EventType, msg.Metadata)
 }
 
 func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
@@ -255,13 +289,16 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 
 	now := nowWIB()
 	agent := &Agent{
-		ID:        msg.AgentID,
-		Hostname:  msg.Hostname,
-		IP:        msg.IP,
-		OS:        msg.OS,
-		LastSeen:  now,
-		Status:    "online",
-		CreatedAt: now,
+		ID:             msg.AgentID,
+		Hostname:       msg.Hostname,
+		IP:             msg.IP,
+		OS:             msg.OS,
+		LastSeen:       now,
+		Status:         "online",
+		CreatedAt:      now,
+		AgentVersion:   msg.AgentVersion,
+		WindowsVersion: msg.WindowsVersion,
+		DiskCapacityGB: msg.DiskCapacityGB,
 	}
 	if err := h.db.UpsertAgent(agent); err != nil {
 		slog.Error("upsert agent failed", "agent_id", msg.AgentID, "error", err)
@@ -282,6 +319,9 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 		}
 		if h.catalog != nil {
 			h.catalog.Observe(msg.AgentID, msg.Processes)
+		}
+		if h.policyEngine != nil {
+			h.policyEngine.EvaluateProcesses(msg.AgentID, msg.Hostname, msg.Processes)
 		}
 	}
 

@@ -26,6 +26,7 @@ const (
 	maxBackoff     = 60 * time.Second
 	agentOS        = "Windows 11 Home"
 	agentVersion   = "1.1.0"
+	writeWait      = 10 * time.Second
 )
 
 var (
@@ -61,11 +62,25 @@ func (p *agentProgram) Start(_ service.Service) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.done = make(chan struct{})
+	startEventWatchers(ctx, p.agentID)
 	go func() {
 		defer close(p.done)
 		connectLoop(ctx, p.agentID, p.serverURL)
 	}()
 	return nil
+}
+
+// startEventWatchers launches the Phase 2 System Policy Enforcement
+// detectors (Modules 1–5). They run for the lifetime of ctx independently of
+// connection state — sendEvent (agent/events.go) silently drops events while
+// disconnected, the same at-most-effort behavior sendMetrics already has, so
+// there's no need to gate watcher startup on a live connection.
+func startEventWatchers(ctx context.Context, agentID string) {
+	go startUSBWatch(ctx, agentID)
+	go startDownloadWatch(ctx, agentID)
+	go startDesktopWatch(ctx, agentID)
+	go startConfigWatch(ctx, agentID)
+	go startInstallWatch(ctx, agentID)
 }
 
 func (p *agentProgram) Stop(_ service.Service) error {
@@ -204,6 +219,7 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
+		startEventWatchers(ctx, agentID)
 		go connectLoop(ctx, agentID, serverURL)
 
 		<-sigCh
@@ -284,8 +300,65 @@ func connectLoop(ctx context.Context, agentID, serverURL string) {
 	}
 }
 
+// ── Outbound message queue ──────────────────────────────────────────────────
+//
+// gorilla/websocket does not allow concurrent writers on one connection.
+// Before Phase 2 this was a latent bug — executor.go/deepfreeze.go/ssh.go all
+// called conn.WriteMessage directly from their own goroutines — that Phase 2's
+// event watchers (usbwatch.go, downloadwatch.go, etc.) would trigger far more
+// often. Fixed the same way server/hub.go already solves this exact problem
+// on the server side: a single writer goroutine owns the connection, fed by a
+// buffered channel every other goroutine pushes onto instead.
+
+var (
+	wsSendMu sync.RWMutex
+	wsSendCh chan []byte
+)
+
+func setSendChannel(ch chan []byte) {
+	wsSendMu.Lock()
+	wsSendCh = ch
+	wsSendMu.Unlock()
+}
+
+// wsSend queues data for the writer goroutine. Non-blocking: if the buffer is
+// full or there's no active connection, the message is dropped rather than
+// stalling the caller — mirrors server/hub.go's SendToAgent, which makes the
+// same trade-off.
+func wsSend(data []byte) {
+	wsSendMu.RLock()
+	ch := wsSendCh
+	wsSendMu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- data:
+	default:
+		logMsg("WARN", "ws send buffer full, dropping message")
+	}
+}
+
 func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error {
-	if err := sendMetrics(conn, agentID); err != nil {
+	sendCh := make(chan []byte, 256)
+	setSendChannel(sendCh)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for data := range sendCh {
+			conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		setSendChannel(nil)
+		close(sendCh)
+		<-writerDone
+	}()
+
+	if err := sendMetrics(agentID); err != nil {
 		return fmt.Errorf("initial metrics: %w", err)
 	}
 
@@ -297,7 +370,7 @@ func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error
 				done <- err
 				return
 			}
-			handleServerMessage(conn, agentID, data)
+			handleServerMessage(agentID, data)
 		}
 	}()
 
@@ -308,14 +381,17 @@ func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error
 	for {
 		select {
 		case <-ctx.Done():
-			// Graceful close: tell the server we're shutting down.
+			// Graceful close: tell the server we're shutting down. Sent
+			// directly (bypassing the channel) since we're tearing down the
+			// writer goroutine right after anyway.
+			conn.SetWriteDeadline(time.Now().Add(writeWait))
 			conn.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"))
 			return nil
 		case err := <-done:
 			return err
 		case <-ticker.C:
-			if err := sendMetrics(conn, agentID); err != nil {
+			if err := sendMetrics(agentID); err != nil {
 				return fmt.Errorf("send metrics: %w", err)
 			}
 			if time.Since(lastMetricLog) >= 5*time.Minute {
@@ -326,7 +402,7 @@ func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error
 	}
 }
 
-func sendMetrics(conn *websocket.Conn, agentID string) error {
+func sendMetrics(agentID string) error {
 	if current := getLocalIP(); current != "unknown" {
 		agentIP = current
 	}
@@ -339,10 +415,11 @@ func sendMetrics(conn *websocket.Conn, agentID string) error {
 	if err != nil {
 		return err
 	}
-	return conn.WriteMessage(websocket.TextMessage, data)
+	wsSend(data)
+	return nil
 }
 
-func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
+func handleServerMessage(agentID string, data []byte) {
 	var msg map[string]interface{}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		logMsg("ERROR", "Parse server message: %v", err)
@@ -354,21 +431,23 @@ func handleServerMessage(conn *websocket.Conn, agentID string, data []byte) {
 
 	switch msgType {
 	case "exec":
-		go executeCommand(conn, agentID, msg)
+		go executeCommand(agentID, msg)
 	case "file_deploy":
-		go deployFile(conn, agentID, msg)
+		go deployFile(agentID, msg)
 	case "kill_process":
-		go handleKillProcess(conn, agentID, msg)
+		go handleKillProcess(agentID, msg)
 	case "get_logs":
-		go sendLogLines(conn, agentID, msg)
+		go sendLogLines(agentID, msg)
 	case "deepfreeze":
-		go handleDeepFreeze(conn, agentID, msg)
+		go handleDeepFreeze(agentID, msg)
 	case "install_ssh":
-		go handleInstallSSH(conn, agentID, msg)
+		go handleInstallSSH(agentID, msg)
+	case "delete_file":
+		go handleDeleteFile(agentID, msg)
 	}
 }
 
-func handleKillProcess(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+func handleKillProcess(agentID string, msg map[string]interface{}) {
 	pid := int(floatVal(msg["pid"]))
 	name, _ := msg["proc_name"].(string)
 
@@ -391,7 +470,7 @@ func handleKillProcess(conn *websocket.Conn, agentID string, msg map[string]inte
 		"output":   output,
 	}
 	data, _ := json.Marshal(resp)
-	_ = conn.WriteMessage(websocket.TextMessage, data)
+	wsSend(data)
 	logMsg("INFO", "kill_process pid=%d name=%s output=%s", pid, name, output)
 }
 
@@ -446,7 +525,7 @@ func getLocalIP() string {
 	return "unknown"
 }
 
-func sendLogLines(conn *websocket.Conn, agentID string, msg map[string]interface{}) {
+func sendLogLines(agentID string, msg map[string]interface{}) {
 	lines := 50
 	if v, ok := msg["lines"].(float64); ok && v > 0 {
 		lines = int(v)
@@ -467,5 +546,28 @@ func sendLogLines(conn *websocket.Conn, agentID string, msg map[string]interface
 		"agent_id": agentID,
 		"output":   output,
 	})
-	conn.WriteMessage(websocket.TextMessage, resp)
+	wsSend(resp)
+}
+
+// handleDeleteFile removes a file the Download Policy (Module 2) decided to
+// delete. Mirrors handleKillProcess's request/response shape exactly — same
+// fire-and-wait pattern the server already uses for kill_process.
+func handleDeleteFile(agentID string, msg map[string]interface{}) {
+	path, _ := msg["path"].(string)
+	var output string
+	if path == "" {
+		output = "delete_file: path kosong"
+	} else if err := os.Remove(path); err != nil {
+		output = fmt.Sprintf("gagal hapus %s: %v", path, err)
+	} else {
+		output = fmt.Sprintf("berhasil hapus %s", path)
+	}
+
+	resp, _ := json.Marshal(map[string]interface{}{
+		"type":     "delete_file_result",
+		"agent_id": agentID,
+		"output":   output,
+	})
+	wsSend(resp)
+	logMsg("INFO", "delete_file path=%s output=%s", path, output)
 }
