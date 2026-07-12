@@ -22,6 +22,13 @@ var allowedUploadExts = map[string]bool{
 	".ps1": true,
 }
 
+var validAppStatuses = map[string]bool{
+	AppStatusPendingReview: true,
+	AppStatusAllowed:       true,
+	AppStatusBlocked:       true,
+	AppStatusIgnored:       true,
+}
+
 // wingetIDRe matches valid winget package IDs: Publisher.AppName style.
 // Allows letters, digits, dots, dashes, underscores, plus signs.
 var wingetIDRe = regexp.MustCompile(`^[A-Za-z0-9][\w.\-+]*$`)
@@ -182,6 +189,84 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		c.JSON(http.StatusOK, alerts)
 	})
 
+	// ── Applications / Categories ──────────────────────────────────────
+
+	api.GET("/applications", func(c *gin.Context) {
+		status := c.Query("status")
+		if status != "" && !validAppStatuses[status] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
+			return
+		}
+		var categoryID int64
+		if v := c.Query("category_id"); v != "" {
+			id, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid category_id"})
+				return
+			}
+			categoryID = id
+		}
+		apps, err := db.GetApplications(status, categoryID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, apps)
+	})
+
+	api.GET("/applications/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid application id"})
+			return
+		}
+		app, err := db.GetApplicationByID(id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if app == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "application not found"})
+			return
+		}
+		c.JSON(http.StatusOK, app)
+	})
+
+	api.PATCH("/applications/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid application id"})
+			return
+		}
+		var req struct {
+			Status     string `json:"status"`
+			CategoryID *int64 `json:"category_id"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if !validAppStatuses[req.Status] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "status must be one of pending_review, allowed, blocked, ignored"})
+			return
+		}
+		if err := db.UpdateApplicationStatus(id, req.Status, req.CategoryID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		db.InsertAuditLog("update_application", strconv.FormatInt(id, 10), fmt.Sprintf("status=%s", req.Status), c.ClientIP())
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	api.GET("/categories", func(c *gin.Context) {
+		categories, err := db.GetAllCategories()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, categories)
+	})
+
 	// ── Settings ─────────────────────────────────────────────────────────
 
 	api.GET("/settings", func(c *gin.Context) {
@@ -235,8 +320,8 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 
 	api.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"ok":           true,
-			"uptime":       time.Since(serverStart).Round(time.Second).String(),
+			"ok":            true,
+			"uptime":        time.Since(serverStart).Round(time.Second).String(),
 			"agents_online": hub.OnlineCount(),
 		})
 	})

@@ -8,6 +8,8 @@ let expandedRows  = new Set();
 let deployPollers = {};
 let refreshTimer  = null;
 let meshBaseURL   = '';
+let allCategories = [];
+let appFilterStatus = 'pending_review';
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 function getToken() { return localStorage.getItem('auth_token') || ''; }
@@ -154,6 +156,8 @@ function showTab(name) {
     refreshTimer = setInterval(loadAlerts, 10000);
   } else if (name === 'logs') {
     loadLogs();
+  } else if (name === 'applications') {
+    loadApplications();
   }
 }
 
@@ -256,17 +260,34 @@ function makeDetailRow(id) {
   return tr;
 }
 
+function buildDeviceProfile(ag) {
+  if (!ag) return '<p class="no-data">Data perangkat belum tersedia</p>';
+  const rows = [
+    ['Agent Version', ag.agent_version || '—'],
+    ['Windows Version', ag.windows_version || '—'],
+    ['Kapasitas Disk', ag.disk_capacity_gb ? `${ag.disk_capacity_gb.toFixed(0)} GB` : '—'],
+    ['Aplikasi Terdeteksi', ag.installed_software_count ?? '—'],
+    ['Proses Berjalan', ag.running_process_count ?? '—'],
+  ];
+  return `<table class="device-profile-table">
+    <tbody>${rows.map(([label, val]) => `<tr><td>${label}</td><td>${esc(String(val))}</td></tr>`).join('')}</tbody>
+  </table>`;
+}
+
 async function loadAgentDetail(id, tr) {
   try {
     const [procs, metrics] = await Promise.all([
       api('GET', `/agents/${id}/processes`),
       api('GET', `/agents/${id}/metrics`),
     ]);
+    const ag = allAgents.find(a => a.id === id);
     tr.querySelector('.detail-content').innerHTML = `
       <div class="detail-grid">
         <div>
           <h4>CPU &amp; RAM — 24 Jam Terakhir</h4>
           ${buildSparklines(metrics)}
+          <h4 style="margin-top:14px">Profil Perangkat</h4>
+          ${buildDeviceProfile(ag)}
         </div>
         <div>
           <h4>Proses Aktif (${(procs||[]).length})</h4>
@@ -644,6 +665,7 @@ async function loadSettings() {
     document.getElementById('s-smtp-pass').value = s.smtp_pass              || '';
     document.getElementById('s-smtp-to').value   = s.smtp_to                || '';
     document.getElementById('s-mesh-url').value  = s.mesh_url               || '';
+    document.getElementById('s-auto-kill').checked = s.auto_kill_enabled === 'true';
     meshBaseURL = s.mesh_url || '';
     try {
       const bl = JSON.parse(s.blacklist || '[]');
@@ -661,6 +683,7 @@ async function saveSettings() {
       ram_threshold:         document.getElementById('s-ram').value,
       offline_after_minutes: document.getElementById('s-offline').value,
       blacklist,
+      auto_kill_enabled:     document.getElementById('s-auto-kill').checked,
       telegram_token:        document.getElementById('s-tg-token').value,
       telegram_chat_id:      document.getElementById('s-tg-chat').value,
       smtp_host:             document.getElementById('s-smtp-host').value,
@@ -691,6 +714,101 @@ async function testEmail() {
     await api('POST', '/test/email');
     alert('✓ Email berhasil dikirim.');
   } catch (e) { alert('Gagal: ' + e.message); }
+}
+
+// ── Applications Tab ─────────────────────────────────────────────────────────
+const APP_STATUS_LABEL = {
+  pending_review: 'Pending Review', allowed: 'Allowed', blocked: 'Blocked', ignored: 'Ignored',
+};
+
+async function loadApplications() {
+  const tbody = document.getElementById('applications-tbody');
+  try {
+    if (!allCategories.length) {
+      allCategories = await api('GET', '/categories') || [];
+    }
+    const qs = appFilterStatus ? `?status=${encodeURIComponent(appFilterStatus)}` : '';
+    const apps = await api('GET', '/applications' + qs);
+    renderApplications(apps || []);
+
+    // Pending-review badge always reflects the true count, regardless of the
+    // currently selected filter.
+    const pending = appFilterStatus === 'pending_review'
+      ? (apps || [])
+      : await api('GET', '/applications?status=pending_review');
+    document.getElementById('app-pending-count').textContent = (pending || []).length;
+  } catch (e) {
+    console.error('loadApplications:', e);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function setAppFilter(status) {
+  appFilterStatus = status;
+  document.querySelectorAll('#app-filter-tabs .inner-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.status === status);
+  });
+  loadApplications();
+}
+
+function categoryOptionsHtml(selectedID) {
+  const opts = ['<option value="">— Tanpa kategori —</option>']
+    .concat(allCategories.map(c =>
+      `<option value="${c.id}" ${selectedID === c.id ? 'selected' : ''}>${esc(c.name)}</option>`));
+  return opts.join('');
+}
+
+function statusOptionsHtml(selected) {
+  return Object.entries(APP_STATUS_LABEL)
+    .map(([val, label]) => `<option value="${val}" ${selected === val ? 'selected' : ''}>${esc(label)}</option>`)
+    .join('');
+}
+
+function renderApplications(apps) {
+  const tbody = document.getElementById('applications-tbody');
+  if (!apps.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">Tidak ada aplikasi pada filter ini</td></tr>';
+    return;
+  }
+  tbody.innerHTML = apps.map(app => `
+    <tr data-app-id="${app.id}">
+      <td><strong>${esc(app.product_name || app.exe_name)}</strong></td>
+      <td>${esc(app.company || '—')}</td>
+      <td style="font-family:monospace;font-size:12px">${esc(app.exe_name)}</td>
+      <td>
+        <select onchange="updateApplication(${app.id}, this.value, null)">
+          ${categoryOptionsHtml(app.category_id)}
+        </select>
+      </td>
+      <td>${app.device_count}</td>
+      <td>${app.total_executions}</td>
+      <td style="font-size:12px;color:var(--muted)">${timeSince(app.last_seen)}</td>
+      <td>
+        <select class="badge badge-${app.status}" onchange="updateApplication(${app.id}, null, this.value)">
+          ${statusOptionsHtml(app.status)}
+        </select>
+      </td>
+    </tr>`).join('');
+}
+
+async function updateApplication(id, categoryValue, statusValue) {
+  const row = document.querySelector(`tr[data-app-id="${id}"]`);
+  const current = row ? {
+    category_id: row.querySelector('td:nth-child(4) select').value || null,
+    status: row.querySelector('td:nth-child(8) select').value,
+  } : {};
+  const body = {
+    status: statusValue !== null ? statusValue : current.status,
+    category_id: categoryValue !== null ? (categoryValue || null) : current.category_id,
+  };
+  if (body.category_id !== null) body.category_id = Number(body.category_id);
+  try {
+    await api('PATCH', `/applications/${id}`, body);
+    loadApplications();
+  } catch (e) {
+    alert('Gagal update aplikasi: ' + e.message);
+    loadApplications();
+  }
 }
 
 // ── Agent Logs Modal ────────────────────────────────────────────────────────

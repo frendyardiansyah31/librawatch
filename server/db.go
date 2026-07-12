@@ -48,21 +48,26 @@ func parseDBTime(s string) time.Time {
 // ─── Data Types ────────────────────────────────────────────────────────────
 
 type Agent struct {
-	ID        string    `json:"id"`
-	Hostname  string    `json:"hostname"`
-	IP        string    `json:"ip"`
-	OS        string    `json:"os"`
-	LastSeen  time.Time `json:"last_seen"`
-	MeshID    string    `json:"mesh_id"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Hostname       string    `json:"hostname"`
+	IP             string    `json:"ip"`
+	OS             string    `json:"os"`
+	LastSeen       time.Time `json:"last_seen"`
+	MeshID         string    `json:"mesh_id"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	AgentVersion   string    `json:"agent_version"`
+	WindowsVersion string    `json:"windows_version"`
+	DiskCapacityGB float64   `json:"disk_capacity_gb"`
 }
 
 type AgentWithMetrics struct {
 	Agent
-	CPU        float64 `json:"cpu"`
-	RAM        float64 `json:"ram"`
-	TopProcess string  `json:"top_process"`
+	CPU                    float64 `json:"cpu"`
+	RAM                    float64 `json:"ram"`
+	TopProcess             string  `json:"top_process"`
+	InstalledSoftwareCount int     `json:"installed_software_count"`
+	RunningProcessCount    int     `json:"running_process_count"`
 }
 
 type Metric struct {
@@ -78,6 +83,87 @@ type Process struct {
 	PID  int     `json:"pid"`
 	CPU  float64 `json:"cpu"`
 	RAM  float64 `json:"ram"`
+
+	// Optional metadata, populated by the agent only the first time it sees a
+	// given executable path in its session (see agent/appmeta.go). Empty on
+	// most messages — the catalog upsert (see catalog.go) treats empty
+	// metadata fields as "no update" rather than blanking existing data.
+	Path           string `json:"path,omitempty"`
+	ProductName    string `json:"product_name,omitempty"`
+	Company        string `json:"company,omitempty"`
+	Description    string `json:"description,omitempty"`
+	ProductVersion string `json:"product_version,omitempty"`
+	Size           int64  `json:"size,omitempty"`
+	FileCreatedAt  string `json:"file_created_at,omitempty"`
+	FileModifiedAt string `json:"file_modified_at,omitempty"`
+}
+
+type Category struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// ApplicationStatus values, validated in server/api.go.
+const (
+	AppStatusPendingReview = "pending_review"
+	AppStatusAllowed       = "allowed"
+	AppStatusBlocked       = "blocked"
+	AppStatusIgnored       = "ignored"
+)
+
+type Application struct {
+	ID             int64     `json:"id"`
+	ExeName        string    `json:"exe_name"`
+	Company        string    `json:"company"`
+	ProductName    string    `json:"product_name"`
+	Description    string    `json:"description"`
+	ProductVersion string    `json:"product_version"`
+	CategoryID     *int64    `json:"category_id"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// ApplicationWithStats is the row shape for GET /api/applications.
+type ApplicationWithStats struct {
+	Application
+	CategoryName    string    `json:"category_name"`
+	DeviceCount     int       `json:"device_count"`
+	TotalExecutions int       `json:"total_executions"`
+	FirstSeen       time.Time `json:"first_seen"`
+	LastSeen        time.Time `json:"last_seen"`
+}
+
+type AppSighting struct {
+	AgentID        string    `json:"agent_id"`
+	Hostname       string    `json:"hostname"`
+	ApplicationID  int64     `json:"application_id"`
+	Path           string    `json:"path"`
+	Size           int64     `json:"size"`
+	FileCreatedAt  string    `json:"file_created_at"`
+	FileModifiedAt string    `json:"file_modified_at"`
+	FirstSeen      time.Time `json:"first_seen"`
+	LastSeen       time.Time `json:"last_seen"`
+	ExecCount      int       `json:"exec_count"`
+}
+
+// ApplicationDetail is the response shape for GET /api/applications/:id.
+type ApplicationDetail struct {
+	ApplicationWithStats
+	Sightings []AppSighting `json:"sightings"`
+}
+
+// AppMetadata carries the optional per-executable facts the agent extracts
+// once per unique path. Nil means "no metadata available this cycle" — the
+// catalog upsert leaves any previously recorded fields untouched.
+type AppMetadata struct {
+	ProductName    string
+	Company        string
+	Description    string
+	ProductVersion string
+	Size           int64
+	FileCreatedAt  time.Time
+	FileModifiedAt time.Time
 }
 
 type Alert struct {
@@ -246,7 +332,88 @@ func (db *DB) migrate() error {
 		ip     TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts);
+
+	CREATE TABLE IF NOT EXISTS categories (
+		id   INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE
+	);
+
+	CREATE TABLE IF NOT EXISTS applications (
+		id               INTEGER PRIMARY KEY AUTOINCREMENT,
+		exe_name         TEXT NOT NULL,
+		company          TEXT NOT NULL DEFAULT '',
+		product_name     TEXT NOT NULL DEFAULT '',
+		description      TEXT NOT NULL DEFAULT '',
+		product_version  TEXT NOT NULL DEFAULT '',
+		category_id      INTEGER REFERENCES categories(id),
+		status           TEXT NOT NULL DEFAULT 'pending_review',
+		sha256           TEXT,
+		signature_status TEXT,
+		created_at       TEXT NOT NULL,
+		updated_at       TEXT NOT NULL
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_identity ON applications(exe_name, company);
+	CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
+
+	CREATE TABLE IF NOT EXISTS app_sightings (
+		agent_id          TEXT NOT NULL REFERENCES agents(id),
+		application_id    INTEGER NOT NULL REFERENCES applications(id),
+		path              TEXT NOT NULL,
+		size              INTEGER NOT NULL DEFAULT 0,
+		file_created_at   TEXT NOT NULL DEFAULT '',
+		file_modified_at  TEXT NOT NULL DEFAULT '',
+		first_seen        TEXT NOT NULL,
+		last_seen         TEXT NOT NULL,
+		exec_count        INTEGER NOT NULL DEFAULT 1,
+		PRIMARY KEY (agent_id, application_id, path)
+	);
+	CREATE INDEX IF NOT EXISTS idx_sightings_app ON app_sightings(application_id);
 	`)
+	if err != nil {
+		return err
+	}
+
+	for _, col := range []struct{ name, decl string }{
+		{"agent_version", "TEXT NOT NULL DEFAULT ''"},
+		{"windows_version", "TEXT NOT NULL DEFAULT ''"},
+		{"disk_capacity_gb", "REAL NOT NULL DEFAULT 0"},
+	} {
+		if err := db.addColumnIfMissing("agents", col.name, col.decl); err != nil {
+			return fmt.Errorf("add column agents.%s: %w", col.name, err)
+		}
+	}
+
+	return nil
+}
+
+// addColumnIfMissing runs ALTER TABLE ... ADD COLUMN only if the column
+// doesn't already exist, so it's safe to call on every startup — the same
+// idempotent-migration philosophy as the CREATE TABLE IF NOT EXISTS blocks
+// above, just for retrofitting a table that already exists.
+func (db *DB) addColumnIfMissing(table, column, decl string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
 	return err
 }
 
@@ -274,16 +441,20 @@ func (db *DB) DeleteAgent(id string) error {
 
 func (db *DB) UpsertAgent(a *Agent) error {
 	_, err := db.Exec(`
-		INSERT INTO agents (id, hostname, ip, os, last_seen, mesh_id, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO agents (id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			hostname  = excluded.hostname,
-			ip        = excluded.ip,
-			os        = excluded.os,
-			last_seen = excluded.last_seen,
-			status    = excluded.status
+			hostname         = excluded.hostname,
+			ip               = excluded.ip,
+			os               = excluded.os,
+			last_seen        = excluded.last_seen,
+			status           = excluded.status,
+			agent_version    = CASE WHEN excluded.agent_version   <> '' THEN excluded.agent_version   ELSE agents.agent_version   END,
+			windows_version  = CASE WHEN excluded.windows_version <> '' THEN excluded.windows_version ELSE agents.windows_version END,
+			disk_capacity_gb = CASE WHEN excluded.disk_capacity_gb <> 0 THEN excluded.disk_capacity_gb ELSE agents.disk_capacity_gb END
 	`, a.ID, a.Hostname, a.IP, a.OS,
-		fmtTime(a.LastSeen), a.MeshID, a.Status, fmtTime(a.CreatedAt))
+		fmtTime(a.LastSeen), a.MeshID, a.Status, fmtTime(a.CreatedAt),
+		a.AgentVersion, a.WindowsVersion, a.DiskCapacityGB)
 	return err
 }
 
@@ -291,9 +462,12 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 	rows, err := db.Query(`
 		SELECT
 			a.id, a.hostname, a.ip, a.os, a.last_seen, a.mesh_id, a.status, a.created_at,
+			a.agent_version, a.windows_version, a.disk_capacity_gb,
 			COALESCE((SELECT cpu  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
 			COALESCE((SELECT ram  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
-			COALESCE((SELECT name FROM processes WHERE agent_id = a.id ORDER BY recorded_at DESC, cpu DESC LIMIT 1), '')
+			COALESCE((SELECT name FROM processes WHERE agent_id = a.id ORDER BY recorded_at DESC, cpu DESC LIMIT 1), ''),
+			(SELECT COUNT(DISTINCT application_id) FROM app_sightings WHERE agent_id = a.id),
+			(SELECT COUNT(*) FROM processes WHERE agent_id = a.id)
 		FROM agents a
 		ORDER BY a.hostname ASC
 	`)
@@ -309,7 +483,9 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 		if err := rows.Scan(
 			&a.ID, &a.Hostname, &a.IP, &a.OS,
 			&lastSeen, &a.MeshID, &a.Status, &createdAt,
+			&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB,
 			&a.CPU, &a.RAM, &a.TopProcess,
+			&a.InstalledSoftwareCount, &a.RunningProcessCount,
 		); err != nil {
 			return nil, err
 		}
@@ -324,9 +500,10 @@ func (db *DB) GetAgentByID(id string) (*AgentWithMetrics, error) {
 	var a AgentWithMetrics
 	var lastSeen, createdAt string
 	err := db.QueryRow(
-		`SELECT id, hostname, ip, os, last_seen, mesh_id, status, created_at
+		`SELECT id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb
 		 FROM agents WHERE id = ?`, id,
-	).Scan(&a.ID, &a.Hostname, &a.IP, &a.OS, &lastSeen, &a.MeshID, &a.Status, &createdAt)
+	).Scan(&a.ID, &a.Hostname, &a.IP, &a.OS, &lastSeen, &a.MeshID, &a.Status, &createdAt,
+		&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -350,6 +527,11 @@ func (db *DB) GetAgentByID(id string) (*AgentWithMetrics, error) {
 	).Scan(&topName); err == nil {
 		a.TopProcess = topName
 	}
+
+	db.QueryRow(`SELECT COUNT(DISTINCT application_id) FROM app_sightings WHERE agent_id = ?`, id).
+		Scan(&a.InstalledSoftwareCount)
+	db.QueryRow(`SELECT COUNT(*) FROM processes WHERE agent_id = ?`, id).
+		Scan(&a.RunningProcessCount)
 
 	return &a, nil
 }
@@ -719,6 +901,7 @@ func (db *DB) InitDefaultSettings(cfg *Config) error {
 		"ram_threshold":         fmt.Sprintf("%.0f", cfg.Alerts.RAMThreshold),
 		"offline_after_minutes": fmt.Sprintf("%d", cfg.Alerts.OfflineAfterMinutes),
 		"blacklist":             string(blacklistJSON),
+		"auto_kill_enabled":     "false",
 		"telegram_token":        cfg.Telegram.Token,
 		"telegram_chat_id":      cfg.Telegram.ChatID,
 		"smtp_host":             cfg.Email.SMTPHost,
@@ -777,4 +960,214 @@ func (db *DB) GetAuditLogs(limit int) ([]AuditLog, error) {
 		result = append(result, a)
 	}
 	return result, rows.Err()
+}
+
+// ─── Category Queries ──────────────────────────────────────────────────────
+
+var defaultCategories = []string{
+	"Browser", "Office", "Academic", "Programming", "Graphic Design",
+	"Multimedia", "Games", "Remote Access", "Utilities", "System",
+}
+
+// InitDefaultCategories seeds the category list on first run. Idempotent —
+// safe to call on every startup, same pattern as InitDefaultSettings.
+func (db *DB) InitDefaultCategories() error {
+	for _, name := range defaultCategories {
+		if _, err := db.Exec(`INSERT OR IGNORE INTO categories (name) VALUES (?)`, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) GetAllCategories() ([]Category, error) {
+	rows, err := db.Query(`SELECT id, name FROM categories ORDER BY name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]Category, 0)
+	for rows.Next() {
+		var c Category
+		if err := rows.Scan(&c.ID, &c.Name); err != nil {
+			return nil, err
+		}
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
+// ─── Application Queries ───────────────────────────────────────────────────
+
+// UpsertApplication finds or creates the catalog row identified by
+// (exeName, company). Metadata fields are only written when non-empty, so a
+// later sighting that arrives without metadata (the common case — the agent
+// only extracts it once per path per session) never blanks out previously
+// recorded data. Returns the application ID.
+func (db *DB) UpsertApplication(exeName, company string, meta *AppMetadata) (int64, error) {
+	now := fmtTime(nowWIB())
+
+	var productName, description, productVersion string
+	if meta != nil {
+		productName, description, productVersion = meta.ProductName, meta.Description, meta.ProductVersion
+	}
+
+	_, err := db.Exec(`
+		INSERT INTO applications (exe_name, company, product_name, description, product_version, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(exe_name, company) DO UPDATE SET
+			product_name    = CASE WHEN excluded.product_name    <> '' THEN excluded.product_name    ELSE applications.product_name    END,
+			description     = CASE WHEN excluded.description     <> '' THEN excluded.description     ELSE applications.description     END,
+			product_version = CASE WHEN excluded.product_version <> '' THEN excluded.product_version ELSE applications.product_version END,
+			updated_at      = excluded.updated_at
+	`, exeName, company, productName, description, productVersion, AppStatusPendingReview, now, now)
+	if err != nil {
+		return 0, err
+	}
+
+	var id int64
+	err = db.QueryRow(`SELECT id FROM applications WHERE exe_name = ? AND company = ?`, exeName, company).Scan(&id)
+	return id, err
+}
+
+// GetApplications lists the catalog, optionally filtered by status and/or category.
+func (db *DB) GetApplications(status string, categoryID int64) ([]ApplicationWithStats, error) {
+	query := `
+		SELECT
+			a.id, a.exe_name, a.company, a.product_name, a.description, a.product_version,
+			a.category_id, a.status, a.created_at, a.updated_at,
+			COALESCE(c.name, ''),
+			COALESCE((SELECT COUNT(DISTINCT agent_id) FROM app_sightings WHERE application_id = a.id), 0),
+			COALESCE((SELECT SUM(exec_count) FROM app_sightings WHERE application_id = a.id), 0),
+			COALESCE((SELECT MIN(first_seen) FROM app_sightings WHERE application_id = a.id), ''),
+			COALESCE((SELECT MAX(last_seen) FROM app_sightings WHERE application_id = a.id), '')
+		FROM applications a
+		LEFT JOIN categories c ON c.id = a.category_id
+		WHERE 1=1`
+	args := []interface{}{}
+	if status != "" {
+		query += ` AND a.status = ?`
+		args = append(args, status)
+	}
+	if categoryID != 0 {
+		query += ` AND a.category_id = ?`
+		args = append(args, categoryID)
+	}
+	query += ` ORDER BY a.updated_at DESC`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]ApplicationWithStats, 0)
+	for rows.Next() {
+		var app ApplicationWithStats
+		var categoryID sql.NullInt64
+		var createdAt, updatedAt, firstSeen, lastSeen string
+		if err := rows.Scan(
+			&app.ID, &app.ExeName, &app.Company, &app.ProductName, &app.Description, &app.ProductVersion,
+			&categoryID, &app.Status, &createdAt, &updatedAt,
+			&app.CategoryName, &app.DeviceCount, &app.TotalExecutions, &firstSeen, &lastSeen,
+		); err != nil {
+			return nil, err
+		}
+		if categoryID.Valid {
+			app.CategoryID = &categoryID.Int64
+		}
+		app.CreatedAt = parseDBTime(createdAt)
+		app.UpdatedAt = parseDBTime(updatedAt)
+		app.FirstSeen = parseDBTime(firstSeen)
+		app.LastSeen = parseDBTime(lastSeen)
+		result = append(result, app)
+	}
+	return result, rows.Err()
+}
+
+func (db *DB) GetApplicationByID(id int64) (*ApplicationDetail, error) {
+	apps, err := db.GetApplications("", 0)
+	if err != nil {
+		return nil, err
+	}
+	var found *ApplicationWithStats
+	for i := range apps {
+		if apps[i].ID == id {
+			found = &apps[i]
+			break
+		}
+	}
+	if found == nil {
+		return nil, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT s.agent_id, COALESCE(ag.hostname, ''), s.application_id, s.path, s.size,
+		       s.file_created_at, s.file_modified_at, s.first_seen, s.last_seen, s.exec_count
+		FROM app_sightings s
+		LEFT JOIN agents ag ON ag.id = s.agent_id
+		WHERE s.application_id = ?
+		ORDER BY s.last_seen DESC
+	`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sightings := make([]AppSighting, 0)
+	for rows.Next() {
+		var s AppSighting
+		var firstSeen, lastSeen string
+		if err := rows.Scan(
+			&s.AgentID, &s.Hostname, &s.ApplicationID, &s.Path, &s.Size,
+			&s.FileCreatedAt, &s.FileModifiedAt, &firstSeen, &lastSeen, &s.ExecCount,
+		); err != nil {
+			return nil, err
+		}
+		s.FirstSeen = parseDBTime(firstSeen)
+		s.LastSeen = parseDBTime(lastSeen)
+		sightings = append(sightings, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return &ApplicationDetail{ApplicationWithStats: *found, Sightings: sightings}, nil
+}
+
+func (db *DB) UpdateApplicationStatus(id int64, status string, categoryID *int64) error {
+	_, err := db.Exec(
+		`UPDATE applications SET status = ?, category_id = ?, updated_at = ? WHERE id = ?`,
+		status, categoryID, fmtTime(nowWIB()), id,
+	)
+	return err
+}
+
+// ─── App Sighting Queries ──────────────────────────────────────────────────
+
+// UpsertSighting records that applicationID was seen running at path on
+// agentID. size/createdAt/modifiedAt are only written on insert or when the
+// caller has fresh metadata (size > 0) — repeat sightings without metadata
+// just bump last_seen and exec_count.
+func (db *DB) UpsertSighting(agentID string, applicationID int64, path string, size int64, fileCreatedAt, fileModifiedAt time.Time) error {
+	now := fmtTime(nowWIB())
+	var createdStr, modifiedStr string
+	if !fileCreatedAt.IsZero() {
+		createdStr = fmtTime(fileCreatedAt)
+	}
+	if !fileModifiedAt.IsZero() {
+		modifiedStr = fmtTime(fileModifiedAt)
+	}
+
+	_, err := db.Exec(`
+		INSERT INTO app_sightings (agent_id, application_id, path, size, file_created_at, file_modified_at, first_seen, last_seen, exec_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+		ON CONFLICT(agent_id, application_id, path) DO UPDATE SET
+			last_seen         = excluded.last_seen,
+			exec_count        = app_sightings.exec_count + 1,
+			size              = CASE WHEN excluded.size > 0 THEN excluded.size ELSE app_sightings.size END,
+			file_created_at   = CASE WHEN excluded.file_created_at  <> '' THEN excluded.file_created_at  ELSE app_sightings.file_created_at  END,
+			file_modified_at  = CASE WHEN excluded.file_modified_at <> '' THEN excluded.file_modified_at ELSE app_sightings.file_modified_at END
+	`, agentID, applicationID, path, size, createdStr, modifiedStr, now, now)
+	return err
 }

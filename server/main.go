@@ -222,6 +222,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := db.InitDefaultCategories(); err != nil {
+		slog.Error("categories init failed", "error", err)
+		os.Exit(1)
+	}
+
 	// ── Auth / Hub / Alerter / Deployer ───────────────────────────────────
 	authMgr := NewAuthManager(cfg.Auth.AdminUsername, cfg.Auth.AdminPassword)
 	if cfg.Auth.AdminUsername != "" {
@@ -235,12 +240,15 @@ func main() {
 		slog.Info("WebSocket auth enabled")
 	}
 
-	alerter := NewAlerter(db)
+	alerter := NewAlerter(db, hub)
 	hub.alerter = alerter
 	go alerter.StartOfflineChecker()
 
 	deployer := NewDeployer(db, hub)
 	hub.deployer = deployer
+
+	catalog := NewCatalog(db)
+	hub.catalog = catalog
 
 	go func() {
 		ticker := time.NewTicker(time.Hour)
@@ -288,6 +296,21 @@ func main() {
 	api := r.Group("/api", adminMiddleware, authMgr.Middleware())
 	api.POST("/logout", handleLogout(authMgr, db))
 	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
+
+	// /mcp exposes MCP tools (e.g. get_online_pcs) for machine clients like
+	// OpenClaw. Protected by a static bearer token, same pattern as the
+	// WebSocket agent token above (empty = disabled).
+	mcpAuth := func(c *gin.Context) {
+		if cfg.Auth.MCPToken != "" {
+			token := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+			if token != cfg.Auth.MCPToken {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+		}
+		c.Next()
+	}
+	r.Any("/mcp", adminMiddleware, mcpAuth, gin.WrapH(NewMCPHandler(hub, db, deployer, cfg.DeepFreeze.Password)))
 
 	// ── HTTP server ────────────────────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

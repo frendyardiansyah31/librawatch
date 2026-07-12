@@ -58,14 +58,18 @@ func handleDeepFreeze(conn *websocket.Conn, agentID string, msg map[string]inter
 		runDFCmd(password, "/BOOTFROZEN", action, send)
 
 	case "query_df":
-		output, err := queryIsFrozen()
+		frozen, output, err := queryIsFrozen()
 		if err != nil {
 			logMsg("ERROR", "DeepFreeze: query_df gagal: %v | output=%q", err, output)
 			send("error", output)
 			return
 		}
-		logMsg("INFO", "DeepFreeze: query_df result=%q", output)
-		send("ok", output)
+		status := "THAWED"
+		if frozen {
+			status = "FROZEN"
+		}
+		logMsg("INFO", "DeepFreeze: query_df result=%s (output=%q)", status, output)
+		send("ok", status)
 
 	default:
 		logMsg("WARN", "DeepFreeze: action tidak dikenal: %q", action)
@@ -94,11 +98,15 @@ func runDFCmd(password, flag, action string, send func(string, string)) {
 	}
 
 	// Verify the new state via ISFROZEN so the operator can confirm the change.
-	verifyOut, verifyErr := queryIsFrozen()
+	verifyFrozen, verifyOut, verifyErr := queryIsFrozen()
+	verifyStatus := "THAWED"
+	if verifyFrozen {
+		verifyStatus = "FROZEN"
+	}
 	if verifyErr != nil {
 		logMsg("ERROR", "DeepFreeze: verifikasi ISFROZEN gagal setelah %s: %v | output=%q", action, verifyErr, verifyOut)
 	} else {
-		logMsg("INFO", "DeepFreeze: verifikasi setelah %s — ISFROZEN=%q", action, verifyOut)
+		logMsg("INFO", "DeepFreeze: verifikasi setelah %s — status=%s", action, verifyStatus)
 	}
 
 	var sb strings.Builder
@@ -106,15 +114,21 @@ func runDFCmd(password, flag, action string, send func(string, string)) {
 		sb.WriteString(cmdOutput)
 		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("Verifikasi ISFROZEN: %s", verifyOut))
+	if verifyErr != nil {
+		fmt.Fprintf(&sb, "Verifikasi ISFROZEN gagal: %s", verifyOut)
+	} else {
+		fmt.Fprintf(&sb, "Verifikasi status: %s", verifyStatus)
+	}
 	sb.WriteString("\n(PC akan restart segera untuk menerapkan perubahan)")
 
 	send("ok", sb.String())
 }
 
-// queryIsFrozen runs DFC.exe get /ISFROZEN and returns the trimmed output.
-// Returns (output, error); on exec error the output contains the combined stderr+stdout.
-func queryIsFrozen() (string, error) {
+// queryIsFrozen runs DFC.exe get /ISFROZEN. Deep Freeze's DFC.exe reports
+// state via exit code, not stdout: exit 1 = FROZEN, exit 0 = THAWED. Any
+// other exit code (or a launch failure) is a genuine error.
+// Returns (frozen, combined output, error).
+func queryIsFrozen() (bool, string, error) {
 	logMsg("INFO", "DeepFreeze: exec DFC.exe get /ISFROZEN")
 
 	cmd := exec.Command(dfcPath, "get", "/ISFROZEN")
@@ -122,16 +136,25 @@ func queryIsFrozen() (string, error) {
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 
-	logMsg("INFO", "DeepFreeze: ISFROZEN exit=%v output=%q", err, output)
-
-	if err != nil {
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode := exitErr.ExitCode()
+		logMsg("INFO", "DeepFreeze: ISFROZEN exit=%d output=%q", exitCode, output)
+		if exitCode == 1 {
+			return true, output, nil
+		}
 		msg := output
 		if msg == "" {
-			msg = err.Error()
+			msg = fmt.Sprintf("DFC.exe exited with unexpected code %d", exitCode)
 		} else {
-			msg = fmt.Sprintf("%s (exit: %v)", msg, err)
+			msg = fmt.Sprintf("%s (exit: %d)", msg, exitCode)
 		}
-		return msg, err
+		return false, msg, exitErr
 	}
-	return output, nil
+	if err != nil {
+		logMsg("ERROR", "DeepFreeze: ISFROZEN exec failed: %v", err)
+		return false, err.Error(), err
+	}
+
+	logMsg("INFO", "DeepFreeze: ISFROZEN exit=0 output=%q", output)
+	return false, output, nil
 }

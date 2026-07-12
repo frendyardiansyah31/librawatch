@@ -48,8 +48,8 @@ type OutgoingMessage struct {
 	Filename string `json:"filename,omitempty"`
 	Args     string `json:"args,omitempty"`
 	Lines    int    `json:"lines,omitempty"`
-	Action   string `json:"action,omitempty"`   // deepfreeze: thaw/freeze/query_df
-	Password string `json:"password,omitempty"` // deepfreeze: optional DF password
+	Action   string `json:"action,omitempty"`    // deepfreeze: thaw/freeze/query_df
+	Password string `json:"password,omitempty"`  // deepfreeze: optional DF password
 	PID      int    `json:"pid,omitempty"`       // kill_process: target PID
 	ProcName string `json:"proc_name,omitempty"` // kill_process: fallback by name
 }
@@ -127,6 +127,7 @@ type Hub struct {
 	alerter       *Alerter
 	deployer      *Deployer
 	batcher       *MetricsBatcher
+	catalog       *Catalog
 	authToken     string   // if non-empty, WebSocket clients must provide ?token=
 	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
 	logWaiters    sync.Map // agentID → chan string, pending log relay
@@ -278,6 +279,9 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 	if len(msg.Processes) > 0 {
 		if err := h.db.UpsertProcesses(msg.AgentID, msg.Processes); err != nil {
 			slog.Error("upsert processes failed", "agent_id", msg.AgentID, "error", err)
+		}
+		if h.catalog != nil {
+			h.catalog.Observe(msg.AgentID, msg.Processes)
 		}
 	}
 

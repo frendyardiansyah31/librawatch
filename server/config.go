@@ -18,6 +18,7 @@ type Config struct {
 		AdminCIDRs    []string `yaml:"admin_cidrs"`    // IP ranges allowed to access dashboard/API (empty = all)
 		AdminUsername string   `yaml:"admin_username"` // dashboard login username (empty = auth disabled)
 		AdminPassword string   `yaml:"admin_password"` // dashboard login password
+		MCPToken      string   `yaml:"mcp_token"`      // bearer token for /mcp endpoint (empty = disabled)
 	} `yaml:"auth"`
 
 	Database struct {
@@ -48,6 +49,10 @@ type Config struct {
 		URL string `yaml:"url"`
 	} `yaml:"meshcentral"`
 
+	DeepFreeze struct {
+		Password string `yaml:"password"` // used by freeze_pc/thaw_pc MCP tools and the deploy panel's deepfreeze action
+	} `yaml:"deepfreeze"`
+
 	Uploads struct {
 		Path      string `yaml:"path"`
 		MaxSizeMB int64  `yaml:"max_size_mb"`
@@ -63,6 +68,7 @@ auth:
   admin_cidrs: []       # batasi akses dashboard/API ke IP tertentu, contoh: ["10.5.39.88/32"]
   admin_username: ""    # username login dashboard (kosong = auth nonaktif)
   admin_password: ""    # password login dashboard
+  mcp_token: ""          # bearer token untuk endpoint /mcp (kosong = nonaktif)
 
 database:
   path: "./data/library.db"
@@ -91,6 +97,9 @@ email:
 
 meshcentral:
   url: "http://192.168.1.10:4430"
+
+deepfreeze:
+  password: ""  # Deep Freeze admin password (DFC.exe), dipakai freeze_pc/thaw_pc MCP tools
 
 uploads:
   path: "./uploads"

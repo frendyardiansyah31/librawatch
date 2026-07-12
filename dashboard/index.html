@@ -58,6 +58,9 @@
       <button class="tab-btn" data-tab="logs" onclick="showTab('logs')">
         Log Server
       </button>
+      <button class="tab-btn" data-tab="applications" onclick="showTab('applications')">
+        Applications
+      </button>
     </nav>
 
     <main>
@@ -276,6 +279,40 @@
           <pre id="logs-content" class="log-viewer">Memuat…</pre>
         </div>
       </div>
+
+      <!-- ── Applications ───────────────────────────────────────────────────── -->
+      <div id="tab-applications" class="tab-content">
+        <div class="panel">
+          <div class="inner-tabs" id="app-filter-tabs">
+            <button class="inner-tab active" data-status="pending_review" onclick="setAppFilter('pending_review')">
+              Pending Review <span id="app-pending-count" class="badge badge-pending_review" style="margin-left:4px"></span>
+            </button>
+            <button class="inner-tab" data-status="" onclick="setAppFilter('')">Semua</button>
+            <button class="inner-tab" data-status="allowed" onclick="setAppFilter('allowed')">Allowed</button>
+            <button class="inner-tab" data-status="blocked" onclick="setAppFilter('blocked')">Blocked</button>
+            <button class="inner-tab" data-status="ignored" onclick="setAppFilter('ignored')">Ignored</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Aplikasi</th>
+                  <th>Company</th>
+                  <th>Executable</th>
+                  <th>Kategori</th>
+                  <th>Devices</th>
+                  <th>Eksekusi</th>
+                  <th>Terakhir Terlihat</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="applications-tbody">
+                <tr><td colspan="8" class="empty">Memuat data…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </main>
 
     <!-- ── Settings Modal ────────────────────────────────────────────────────── -->
@@ -311,6 +348,13 @@
                 rows="5"
                 placeholder="steam.exe&#10;discord.exe"
               ></textarea>
+            </div>
+            <div class="form-row-check">
+              <input id="s-auto-kill" type="checkbox" />
+              <label for="s-auto-kill"
+                >Auto-kill aplikasi blacklist (kalau tidak dicentang, hanya
+                kirim notifikasi seperti biasa)</label
+              >
             </div>
           </section>
 

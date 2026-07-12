@@ -25,6 +25,7 @@ const (
 	initialBackoff = 5 * time.Second
 	maxBackoff     = 60 * time.Second
 	agentOS        = "Windows 11 Home"
+	agentVersion   = "1.1.0"
 )
 
 var (

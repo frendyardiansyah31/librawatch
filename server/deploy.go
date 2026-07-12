@@ -58,7 +58,9 @@ func (d *Deployer) CreateJob(jobType, payload, args string, targets []string) (*
 		}
 	}
 	if onlineCount == len(agentIDs) {
-		_ = d.db.UpdateDeployJobStatus(job.ID, "dispatched")
+		if err := d.db.UpdateDeployJobStatus(job.ID, "dispatched"); err == nil {
+			job.Status = "dispatched"
+		}
 	}
 
 	return job, nil

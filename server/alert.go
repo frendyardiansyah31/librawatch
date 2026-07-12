@@ -23,11 +23,12 @@ const (
 
 type Alerter struct {
 	db          *DB
+	hub         *Hub
 	consecutive sync.Map // "agentID:alertType" → int
 }
 
-func NewAlerter(db *DB) *Alerter {
-	return &Alerter{db: db}
+func NewAlerter(db *DB, hub *Hub) *Alerter {
+	return &Alerter{db: db, hub: hub}
 }
 
 func (a *Alerter) getConsecutive(agentID, alertType string) int {
@@ -90,6 +91,7 @@ func (a *Alerter) CheckMetrics(agentID, hostname string, cpu, ram float64, procs
 
 	// Blacklist process check (60-min cooldown per app per agent)
 	blacklist := parseBlacklistSetting(settings["blacklist"])
+	autoKill := parseBoolSetting(settings["auto_kill_enabled"])
 	for _, proc := range procs {
 		for _, bl := range blacklist {
 			if strings.EqualFold(proc.Name, bl) {
@@ -99,10 +101,28 @@ func (a *Alerter) CheckMetrics(agentID, hostname string, cpu, ram float64, procs
 						hostname, proc.Name, nowWIB().Format("15:04 WIB"))
 					a.fire(agentID, "blacklisted_app", msg, settings)
 				}
+				if autoKill {
+					go a.autoKill(agentID, hostname, proc.Name)
+				}
 				break
 			}
 		}
 	}
+}
+
+// autoKill runs when auto_kill_enabled is on: it kills the blacklisted
+// process on the agent (same mechanism as the dashboard's kill button) and
+// records the outcome in audit_logs, regardless of success or failure, so
+// it's traceable independently of the notification cooldown above.
+func (a *Alerter) autoKill(agentID, hostname, procName string) {
+	output, err := a.hub.KillProcess(agentID, 0, procName)
+	if err != nil {
+		slog.Warn("auto-kill failed", "agent_id", agentID, "hostname", hostname, "process", procName, "error", err)
+		a.db.InsertAuditLog("auto_kill_failed", agentID, fmt.Sprintf("name=%s error=%s", procName, err.Error()), "system")
+		return
+	}
+	slog.Info("auto-kill succeeded", "agent_id", agentID, "hostname", hostname, "process", procName, "output", output)
+	a.db.InsertAuditLog("auto_kill", agentID, fmt.Sprintf("name=%s output=%s", procName, output), "system")
 }
 
 // CheckRecovery fires a recovery alert when an agent reconnects after being offline.
@@ -278,6 +298,10 @@ func (a *Alerter) SendTestEmail() error {
 	m.SetHeader("Subject", "Library Monitor UIII — Tes Email")
 	m.SetBody("text/plain", "✅ Library Monitor UIII: Tes notifikasi email berhasil")
 	return d.DialAndSend(m)
+}
+
+func parseBoolSetting(s string) bool {
+	return s == "true" || s == "1"
 }
 
 func parseFloatSetting(s string, def float64) float64 {
