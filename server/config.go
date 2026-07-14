@@ -57,6 +57,11 @@ type Config struct {
 		Path      string `yaml:"path"`
 		MaxSizeMB int64  `yaml:"max_size_mb"`
 	} `yaml:"uploads"`
+
+	Deploy struct {
+		LeaseMinutes    int `yaml:"lease_minutes"`     // how long a dispatched command may run before it's requeued
+		DefaultMaxRetry int `yaml:"default_max_retry"` // retry budget for jobs that don't specify their own
+	} `yaml:"deploy"`
 }
 
 const defaultConfigYAML = `server:
@@ -104,6 +109,10 @@ deepfreeze:
 uploads:
   path: "./uploads"
   max_size_mb: 500
+
+deploy:
+  lease_minutes: 10      # how long a dispatched command may run before it's requeued
+  default_max_retry: 3   # retry budget for jobs that don't specify their own
 `
 
 func loadConfig(path string) (*Config, error) {
@@ -153,6 +162,12 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Email.SMTPPort == 0 {
 		cfg.Email.SMTPPort = 587
+	}
+	if cfg.Deploy.LeaseMinutes == 0 {
+		cfg.Deploy.LeaseMinutes = 10
+	}
+	if cfg.Deploy.DefaultMaxRetry == 0 {
+		cfg.Deploy.DefaultMaxRetry = 3
 	}
 
 	return &cfg, nil

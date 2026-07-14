@@ -457,10 +457,13 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 
 	api.POST("/deploy", func(c *gin.Context) {
 		var req struct {
-			Type    string   `json:"type"`
-			Payload string   `json:"payload"`
-			Args    string   `json:"args"`
-			Targets []string `json:"targets"`
+			Type     string   `json:"type"`
+			Payload  string   `json:"payload"`
+			Args     string   `json:"args"`
+			Targets  []string `json:"targets"`
+			Priority int      `json:"priority"`
+			ExpireAt string   `json:"expire_at"`
+			MaxRetry *int     `json:"max_retry"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -478,6 +481,23 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		var expireAt *time.Time
+		if req.ExpireAt != "" {
+			t, err := time.Parse(time.RFC3339, req.ExpireAt)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "expire_at must be RFC3339"})
+				return
+			}
+			if t.Before(nowWIB()) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "expire_at must be in the future"})
+				return
+			}
+			expireAt = &t
+		}
+		maxRetry := deployer.DefaultMaxRetry()
+		if req.MaxRetry != nil {
+			maxRetry = *req.MaxRetry
+		}
 		payloadPreview := req.Payload
 		if len(payloadPreview) > 80 {
 			payloadPreview = payloadPreview[:80] + "…"
@@ -487,12 +507,15 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			"type", req.Type,
 			"payload", payloadPreview,
 			"targets", len(req.Targets))
-		job, err := deployer.CreateJob(req.Type, req.Payload, req.Args, req.Targets)
+		job, err := deployer.CreateJob(req.Type, req.Payload, req.Args, req.Targets,
+			req.Priority, expireAt, maxRetry, "system")
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		db.InsertAuditLog("deploy", strings.Join(req.Targets, ","), fmt.Sprintf("type=%s payload=%s", req.Type, payloadPreview), c.ClientIP())
+		db.InsertAuditLog("deploy", strings.Join(req.Targets, ","),
+			fmt.Sprintf("type=%s payload=%s priority=%d max_retry=%d", req.Type, payloadPreview, req.Priority, maxRetry),
+			c.ClientIP())
 		c.JSON(http.StatusOK, job)
 	})
 

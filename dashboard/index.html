@@ -115,6 +115,14 @@
           </div>
 
           <div class="panel deploy-cmd-panel">
+            <div class="deploy-advanced">
+              <label>Priority:</label>
+              <input id="deploy-priority" type="number" value="0" step="1" style="width:70px" />
+              <label>Kadaluarsa (opsional):</label>
+              <input id="deploy-expire" type="datetime-local" />
+              <label>Maks retry:</label>
+              <input id="deploy-maxretry" type="number" value="3" min="0" style="width:60px" />
+            </div>
             <div class="inner-tabs">
               <button
                 class="inner-tab active"

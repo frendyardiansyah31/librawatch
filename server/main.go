@@ -246,6 +246,7 @@ func main() {
 
 	deployer := NewDeployer(db, hub)
 	hub.deployer = deployer
+	go deployer.StartLeaseSweeper()
 
 	catalog := NewCatalog(db)
 	hub.catalog = catalog

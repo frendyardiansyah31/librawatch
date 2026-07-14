@@ -224,13 +224,16 @@ type Alert struct {
 }
 
 type DeployJob struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	Payload   string    `json:"payload"`
-	Args      string    `json:"args"`
-	Targets   string    `json:"targets"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string     `json:"id"`
+	Type      string     `json:"type"`
+	Payload   string     `json:"payload"`
+	Args      string     `json:"args"`
+	Targets   string     `json:"targets"`
+	Status    string     `json:"status"`
+	Priority  int        `json:"priority"`
+	ExpireAt  *time.Time `json:"expire_at,omitempty"`
+	CreatedBy string     `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 type DeployResult struct {
@@ -240,6 +243,20 @@ type DeployResult struct {
 	Status     string     `json:"status"`
 	Output     string     `json:"output"`
 	ExecutedAt *time.Time `json:"executed_at"`
+	LeaseUntil *time.Time `json:"lease_until,omitempty"`
+	RetryCount int        `json:"retry_count"`
+	MaxRetry   int        `json:"max_retry"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	DurationMS *int64     `json:"duration_ms,omitempty"`
+}
+
+// isPendingLikeStatus reports whether a deploy_results row is still "in
+// flight" — i.e. hasn't reached a terminal state yet. Every call site that
+// used to check `status != "pending"` to mean "the agent replied" must use
+// this instead now that "running" also means "not done yet" (server/mcp.go's
+// queryDeepFreezeStatus and dashboard/app.js's startJobPoller both do).
+func isPendingLikeStatus(status string) bool {
+	return status == "pending" || status == "running"
 }
 
 type AuditLog struct {
@@ -461,6 +478,28 @@ func (db *DB) migrate() error {
 	} {
 		if err := db.addColumnIfMissing("agents", col.name, col.decl); err != nil {
 			return fmt.Errorf("add column agents.%s: %w", col.name, err)
+		}
+	}
+
+	for _, col := range []struct{ name, decl string }{
+		{"priority", "INTEGER NOT NULL DEFAULT 0"},
+		{"expire_at", "TEXT"},
+		{"created_by", "TEXT NOT NULL DEFAULT 'system'"},
+	} {
+		if err := db.addColumnIfMissing("deploy_jobs", col.name, col.decl); err != nil {
+			return fmt.Errorf("add column deploy_jobs.%s: %w", col.name, err)
+		}
+	}
+
+	for _, col := range []struct{ name, decl string }{
+		{"lease_until", "TEXT"},
+		{"retry_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"max_retry", "INTEGER NOT NULL DEFAULT 0"},
+		{"exit_code", "INTEGER"},
+		{"duration_ms", "INTEGER"},
+	} {
+		if err := db.addColumnIfMissing("deploy_results", col.name, col.decl); err != nil {
+			return fmt.Errorf("add column deploy_results.%s: %w", col.name, err)
 		}
 	}
 
@@ -827,16 +866,20 @@ func (db *DB) GetLastAlertForApp(agentID, appName string) (*Alert, error) {
 // ─── Deploy Queries ────────────────────────────────────────────────────────
 
 func (db *DB) InsertDeployJob(job *DeployJob) error {
+	var expireAt interface{}
+	if job.ExpireAt != nil {
+		expireAt = fmtTime(*job.ExpireAt)
+	}
 	_, err := db.Exec(`
-		INSERT INTO deploy_jobs (id, type, payload, args, targets, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, job.ID, job.Type, job.Payload, job.Args, job.Targets, job.Status, fmtTime(job.CreatedAt))
+		INSERT INTO deploy_jobs (id, type, payload, args, targets, status, priority, expire_at, created_by, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.Type, job.Payload, job.Args, job.Targets, job.Status, job.Priority, expireAt, job.CreatedBy, fmtTime(job.CreatedAt))
 	return err
 }
 
 func (db *DB) GetAllDeployJobs() ([]DeployJob, error) {
 	rows, err := db.Query(`
-		SELECT id, type, payload, args, targets, status, created_at
+		SELECT id, type, payload, args, targets, status, priority, expire_at, created_by, created_at
 		FROM deploy_jobs ORDER BY created_at DESC LIMIT 100
 	`)
 	if err != nil {
@@ -847,10 +890,16 @@ func (db *DB) GetAllDeployJobs() ([]DeployJob, error) {
 	for rows.Next() {
 		var j DeployJob
 		var createdAt string
-		if err := rows.Scan(&j.ID, &j.Type, &j.Payload, &j.Args, &j.Targets, &j.Status, &createdAt); err != nil {
+		var expireAt sql.NullString
+		if err := rows.Scan(&j.ID, &j.Type, &j.Payload, &j.Args, &j.Targets, &j.Status,
+			&j.Priority, &expireAt, &j.CreatedBy, &createdAt); err != nil {
 			return nil, err
 		}
 		j.CreatedAt = parseDBTime(createdAt)
+		if expireAt.Valid {
+			t := parseDBTime(expireAt.String)
+			j.ExpireAt = &t
+		}
 		result = append(result, j)
 	}
 	return result, rows.Err()
@@ -859,10 +908,12 @@ func (db *DB) GetAllDeployJobs() ([]DeployJob, error) {
 func (db *DB) GetDeployJobByID(id string) (*DeployJob, error) {
 	var j DeployJob
 	var createdAt string
+	var expireAt sql.NullString
 	err := db.QueryRow(`
-		SELECT id, type, payload, args, targets, status, created_at
+		SELECT id, type, payload, args, targets, status, priority, expire_at, created_by, created_at
 		FROM deploy_jobs WHERE id = ?
-	`, id).Scan(&j.ID, &j.Type, &j.Payload, &j.Args, &j.Targets, &j.Status, &createdAt)
+	`, id).Scan(&j.ID, &j.Type, &j.Payload, &j.Args, &j.Targets, &j.Status,
+		&j.Priority, &expireAt, &j.CreatedBy, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -870,6 +921,10 @@ func (db *DB) GetDeployJobByID(id string) (*DeployJob, error) {
 		return nil, err
 	}
 	j.CreatedAt = parseDBTime(createdAt)
+	if expireAt.Valid {
+		t := parseDBTime(expireAt.String)
+		j.ExpireAt = &t
+	}
 	return &j, nil
 }
 
@@ -884,22 +939,23 @@ func (db *DB) CancelDeployJob(id string) error {
 		return err
 	}
 	_, err = db.Exec(`
-		UPDATE deploy_results SET status = 'cancelled', output = 'Job dibatalkan oleh admin'
-		WHERE job_id = ? AND status = 'pending'
+		UPDATE deploy_results SET status = 'cancelled', output = 'Job dibatalkan oleh admin', lease_until = NULL
+		WHERE job_id = ? AND status IN ('pending', 'running')
 	`, id)
 	return err
 }
 
 func (db *DB) InsertDeployResult(r *DeployResult) error {
 	_, err := db.Exec(`
-		INSERT INTO deploy_results (job_id, agent_id, status, output) VALUES (?, ?, ?, ?)
-	`, r.JobID, r.AgentID, r.Status, r.Output)
+		INSERT INTO deploy_results (job_id, agent_id, status, output, max_retry) VALUES (?, ?, ?, ?, ?)
+	`, r.JobID, r.AgentID, r.Status, r.Output, r.MaxRetry)
 	return err
 }
 
 func (db *DB) GetDeployResultsByJobID(jobID string) ([]DeployResult, error) {
 	rows, err := db.Query(`
-		SELECT id, job_id, agent_id, status, output, executed_at
+		SELECT id, job_id, agent_id, status, output, executed_at,
+			lease_until, retry_count, max_retry, exit_code, duration_ms
 		FROM deploy_results WHERE job_id = ? ORDER BY id ASC
 	`, jobID)
 	if err != nil {
@@ -908,49 +964,180 @@ func (db *DB) GetDeployResultsByJobID(jobID string) ([]DeployResult, error) {
 	defer rows.Close()
 	var result []DeployResult
 	for rows.Next() {
-		var r DeployResult
-		var exAt sql.NullString
-		if err := rows.Scan(&r.ID, &r.JobID, &r.AgentID, &r.Status, &r.Output, &exAt); err != nil {
+		if r, err := scanDeployResult(rows); err != nil {
 			return nil, err
+		} else {
+			result = append(result, r)
 		}
-		if exAt.Valid {
-			t := parseDBTime(exAt.String)
-			r.ExecutedAt = &t
-		}
-		result = append(result, r)
 	}
 	return result, rows.Err()
 }
 
-func (db *DB) UpdateDeployResult(jobID, agentID, status, output string) error {
+// scanDeployResult scans one row shaped like GetDeployResultsByJobID's SELECT
+// — shared so AcquireNextJob's paths and any future listing query don't
+// duplicate the same nullable-column handling.
+func scanDeployResult(rows *sql.Rows) (DeployResult, error) {
+	var r DeployResult
+	var exAt, leaseUntil sql.NullString
+	var exitCode sql.NullInt64
+	var durationMS sql.NullInt64
+	if err := rows.Scan(&r.ID, &r.JobID, &r.AgentID, &r.Status, &r.Output, &exAt,
+		&leaseUntil, &r.RetryCount, &r.MaxRetry, &exitCode, &durationMS); err != nil {
+		return r, err
+	}
+	if exAt.Valid {
+		t := parseDBTime(exAt.String)
+		r.ExecutedAt = &t
+	}
+	if leaseUntil.Valid {
+		t := parseDBTime(leaseUntil.String)
+		r.LeaseUntil = &t
+	}
+	if exitCode.Valid {
+		v := int(exitCode.Int64)
+		r.ExitCode = &v
+	}
+	if durationMS.Valid {
+		r.DurationMS = &durationMS.Int64
+	}
+	return r, nil
+}
+
+// UpdateDeployResult applies a status change plus whatever result fields are
+// known. retryCount == nil leaves retry_count untouched. lease_until is
+// always cleared — every transition here either finishes the row or sends it
+// back to a fresh pending state, so a stale lease never lingers. Guarded so a
+// late real agent reply can never overwrite an admin cancellation.
+func (db *DB) UpdateDeployResult(jobID, agentID, status, output string, exitCode *int, durationMS *int64, retryCount *int) error {
+	var executedAt interface{}
+	if !isPendingLikeStatus(status) {
+		executedAt = fmtTime(nowWIB())
+	}
 	_, err := db.Exec(`
-		UPDATE deploy_results SET status = ?, output = ?, executed_at = ?
-		WHERE job_id = ? AND agent_id = ?
-	`, status, output, fmtTime(nowWIB()), jobID, agentID)
+		UPDATE deploy_results SET
+			status = ?, output = ?,
+			exit_code = COALESCE(?, exit_code),
+			duration_ms = COALESCE(?, duration_ms),
+			retry_count = COALESCE(?, retry_count),
+			lease_until = NULL,
+			executed_at = COALESCE(?, executed_at)
+		WHERE job_id = ? AND agent_id = ? AND status <> 'cancelled'
+	`, status, output, exitCode, durationMS, retryCount, executedAt, jobID, agentID)
 	return err
 }
 
-func (db *DB) GetPendingJobsForAgent(agentID string) ([]DeployJob, error) {
-	rows, err := db.Query(`
-		SELECT j.id, j.type, j.payload, j.args, j.targets, j.status, j.created_at
-		FROM deploy_jobs j
-		JOIN deploy_results r ON j.id = r.job_id
+// UpdateJobStatus marks a job "done" once none of its per-agent results are
+// still pending-like (mirrors the same check today's handleExecResult used
+// to do inline) — shared by both the completion path and the lease sweep.
+func (db *DB) UpdateJobStatus(jobID string) error {
+	results, err := db.GetDeployResultsByJobID(jobID)
+	if err != nil {
+		return err
+	}
+	for _, r := range results {
+		if isPendingLikeStatus(r.Status) {
+			return nil
+		}
+	}
+	return db.UpdateDeployJobStatus(jobID, "done")
+}
+
+// AcquireNextJob atomically claims the highest-priority, oldest pending job
+// for agentID and marks its result row 'running' with a lease deadline, all
+// inside one transaction — the single pooled SQLite connection
+// (SetMaxOpenConns(1) in initDB) means this transaction blocks every other
+// goroutine's DB call for its duration, so two concurrent callers (agent
+// reconnect, job completion, lease sweep) can never both claim a job for the
+// same computer. Returns (nil, nil) if the agent already has a running job,
+// or has nothing pending.
+func (db *DB) AcquireNextJob(agentID string, leaseUntil time.Time) (*DeployJob, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var inFlight int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM deploy_results WHERE agent_id = ? AND status = 'running'`, agentID,
+	).Scan(&inFlight); err != nil {
+		return nil, err
+	}
+	if inFlight > 0 {
+		return nil, nil
+	}
+
+	var jobID string
+	err = tx.QueryRow(`
+		SELECT j.id FROM deploy_jobs j JOIN deploy_results r ON j.id = r.job_id
 		WHERE r.agent_id = ? AND r.status = 'pending'
-		ORDER BY j.created_at ASC
-	`, agentID)
+		ORDER BY j.priority DESC, j.created_at ASC LIMIT 1
+	`, agentID).Scan(&jobID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(
+		`UPDATE deploy_results SET status = 'running', lease_until = ? WHERE job_id = ? AND agent_id = ?`,
+		fmtTime(leaseUntil), jobID, agentID,
+	); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return db.GetDeployJobByID(jobID)
+}
+
+// GetExpiredLeaseResults returns every 'running' result whose lease has
+// passed — candidates for the lease sweep to requeue or fail.
+func (db *DB) GetExpiredLeaseResults(now time.Time) ([]DeployResult, error) {
+	rows, err := db.Query(`
+		SELECT id, job_id, agent_id, status, output, executed_at,
+			lease_until, retry_count, max_retry, exit_code, duration_ms
+		FROM deploy_results
+		WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?
+	`, fmtTime(now))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var result []DeployJob
+	var result []DeployResult
 	for rows.Next() {
-		var j DeployJob
-		var createdAt string
-		if err := rows.Scan(&j.ID, &j.Type, &j.Payload, &j.Args, &j.Targets, &j.Status, &createdAt); err != nil {
+		if r, err := scanDeployResult(rows); err != nil {
 			return nil, err
+		} else {
+			result = append(result, r)
 		}
-		j.CreatedAt = parseDBTime(createdAt)
-		result = append(result, j)
+	}
+	return result, rows.Err()
+}
+
+// GetExpiredPendingResults returns every still-'pending' result whose job's
+// expire_at has passed without ever being dispatched.
+func (db *DB) GetExpiredPendingResults(now time.Time) ([]DeployResult, error) {
+	rows, err := db.Query(`
+		SELECT r.id, r.job_id, r.agent_id, r.status, r.output, r.executed_at,
+			r.lease_until, r.retry_count, r.max_retry, r.exit_code, r.duration_ms
+		FROM deploy_results r
+		JOIN deploy_jobs j ON j.id = r.job_id
+		WHERE r.status = 'pending' AND j.expire_at IS NOT NULL AND j.expire_at < ?
+	`, fmtTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []DeployResult
+	for rows.Next() {
+		if r, err := scanDeployResult(rows); err != nil {
+			return nil, err
+		} else {
+			result = append(result, r)
+		}
 	}
 	return result, rows.Err()
 }
@@ -1009,6 +1196,8 @@ func (db *DB) InitDefaultSettings(cfg *Config) error {
 		"smtp_pass":             cfg.Email.SMTPPass,
 		"smtp_to":               cfg.Email.SMTPTo,
 		"mesh_url":              cfg.MeshCentral.URL,
+		"lease_minutes":         fmt.Sprintf("%d", cfg.Deploy.LeaseMinutes),
+		"default_max_retry":     fmt.Sprintf("%d", cfg.Deploy.DefaultMaxRetry),
 	}
 
 	for k, v := range defaults {

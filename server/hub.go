@@ -39,9 +39,11 @@ type IncomingMessage struct {
 	WindowsVersion string  `json:"windows_version"`
 	DiskCapacityGB float64 `json:"disk_capacity_gb"`
 	// exec_result / log_result fields
-	JobID  string `json:"job_id"`
-	Status string `json:"status"`
-	Output string `json:"output"`
+	JobID      string `json:"job_id"`
+	Status     string `json:"status"`
+	Output     string `json:"output"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+	DurationMS *int64 `json:"duration_ms,omitempty"`
 	// event fields (Phase 2 — usb_inserted, download_created, etc; see server/events.go)
 	EventType string                 `json:"event_type"`
 	Metadata  map[string]interface{} `json:"metadata"`
@@ -349,7 +351,7 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 	if len(output) > 4096 {
 		output = output[:4096] + "...[truncated]"
 	}
-	if err := h.db.UpdateDeployResult(msg.JobID, msg.AgentID, msg.Status, output); err != nil {
+	if err := h.db.UpdateDeployResult(msg.JobID, msg.AgentID, msg.Status, output, msg.ExitCode, msg.DurationMS, nil); err != nil {
 		slog.Error("update deploy result failed", "job_id", msg.JobID, "error", err)
 		return
 	}
@@ -359,18 +361,14 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 		"agent_id", msg.AgentID,
 		"status", msg.Status)
 
-	// Mark job done when all target results are no longer pending
-	if results, err := h.db.GetDeployResultsByJobID(msg.JobID); err == nil {
-		allDone := true
-		for _, r := range results {
-			if r.Status == "pending" {
-				allDone = false
-				break
-			}
-		}
-		if allDone {
-			_ = h.db.UpdateDeployJobStatus(msg.JobID, "done")
-		}
+	if err := h.db.UpdateJobStatus(msg.JobID); err != nil {
+		slog.Error("update job status failed", "job_id", msg.JobID, "error", err)
+	}
+
+	// This agent's current command just finished — advance its queue right
+	// away instead of waiting for the next reconnect.
+	if h.deployer != nil {
+		go h.deployer.PumpAgent(msg.AgentID)
 	}
 }
 

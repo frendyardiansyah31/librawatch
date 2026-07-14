@@ -450,6 +450,19 @@ function selectTargets(mode) {
   renderDeployAgentList();
 }
 
+// deployAdvancedFields reads the priority/expire/max-retry inputs shared by
+// every deploy type — generic to all of them, so it lives once here instead
+// of being duplicated into each dtab-* panel.
+function deployAdvancedFields() {
+  const priority = parseInt(document.getElementById('deploy-priority').value, 10) || 0;
+  const expireLocal = document.getElementById('deploy-expire').value;
+  const expire_at = expireLocal ? new Date(expireLocal).toISOString() : '';
+  const mr = parseInt(document.getElementById('deploy-maxretry').value, 10);
+  const fields = { priority, expire_at };
+  if (Number.isFinite(mr)) fields.max_retry = mr;
+  return fields;
+}
+
 async function submitDeploy(mode) {
   const targets = Array.from(deployTargets);
   if (!targets.length) { alert('Pilih minimal satu PC terlebih dahulu.'); return; }
@@ -476,7 +489,7 @@ async function submitDeploy(mode) {
   }
 
   try {
-    const job = await api('POST', '/deploy', { type, payload, args, targets });
+    const job = await api('POST', '/deploy', { type, payload, args, targets, ...deployAdvancedFields() });
     loadDeployHistory();
     startJobPoller(job.id);
   } catch (e) {
@@ -502,6 +515,7 @@ async function submitDeepFreeze() {
       payload: action,
       args: password,
       targets,
+      ...deployAdvancedFields(),
     });
     loadDeployHistory();
     startJobPoller(job.id);
@@ -525,6 +539,7 @@ async function submitInstallSSH() {
       payload: 'install_ssh',
       args: adminIP,
       targets,
+      ...deployAdvancedFields(),
     });
     loadDeployHistory();
     startJobPoller(job.id);
@@ -573,11 +588,13 @@ function renderDeployHistory(jobs) {
     const cancelBtn = canCancel
       ? `<button class="btn-sm btn-danger" onclick="cancelDeployJob('${esc(j.id)}',event)" title="Batalkan job ini">✕ Batalkan</button>`
       : '';
+    const priorityBadge = j.priority ? `<span class="badge badge-priority" title="Priority">P${j.priority}</span>` : '';
     return `
       <div class="job-card">
         <div class="job-card-hdr" onclick="toggleJobCard('${esc(j.id)}')">
           <span class="badge badge-type">${esc(j.type)}</span>
           <span class="job-payload" title="${esc(j.payload)}">${esc(shortPayload)}</span>
+          ${priorityBadge}
           <span class="badge badge-${j.status}">${j.status}</span>
           <span style="color:var(--muted);flex-shrink:0">${timeSince(j.created_at)}</span>
           ${cancelBtn}
@@ -615,12 +632,20 @@ async function loadJobResults(id) {
       el.innerHTML = '<p class="no-data" style="padding:10px">Belum ada hasil</p>';
       return;
     }
-    el.innerHTML = results.map(r => `
+    el.innerHTML = results.map(r => {
+      const meta = [];
+      if (r.retry_count)             meta.push(`retry ${r.retry_count}`);
+      if (r.exit_code !== undefined && r.exit_code !== null) meta.push(`exit ${r.exit_code}`);
+      if (r.duration_ms !== undefined && r.duration_ms !== null) meta.push(`${r.duration_ms}ms`);
+      const metaStr = meta.length ? `<span class="result-meta">${esc(meta.join(' · '))}</span>` : '';
+      return `
       <div class="result-row">
         <span class="result-status ${r.status}">${r.status}</span>
         <span class="result-agent">${esc(agentName(r.agent_id))}</span>
         <span class="result-output">${esc(r.output || '(menunggu…)')}</span>
-      </div>`).join('');
+        ${metaStr}
+      </div>`;
+    }).join('');
   } catch (e) {
     if (el) el.innerHTML = `<p class="no-data" style="padding:10px;color:var(--red)">${esc(e.message)}</p>`;
   }
@@ -637,7 +662,7 @@ function startJobPoller(jobId) {
     const el = document.getElementById('jresults-' + jobId);
     if (el && el.classList.contains('open')) loadJobResults(jobId);
     await loadDeployHistory();
-    const allDone = (data.results || []).every(r => r.status !== 'pending');
+    const allDone = (data.results || []).every(r => !['pending', 'running'].includes(r.status));
     if (allDone || ticks > 120) {
       clearInterval(deployPollers[jobId]);
       delete deployPollers[jobId];

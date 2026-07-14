@@ -315,6 +315,25 @@ tbody td { padding: 10px 12px; vertical-align: middle; }
 .agent-check-item .dot  { flex-shrink: 0; }
 .agent-check-item .ip   { font-size: 11px; color: var(--muted); margin-left: auto; font-family: monospace; }
 
+.deploy-advanced {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+.deploy-advanced input {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
 .inner-tabs {
   display: flex;
   border-bottom: 1px solid var(--border);
@@ -378,6 +397,16 @@ tbody td { padding: 10px 12px; vertical-align: middle; }
 .badge-pending  { background: #fef3c7; color: #92400e; }
 .badge-dispatched { background: #dbeafe; color: #1e40af; }
 .badge-done     { background: #dcfce7; color: #166534; }
+.badge-priority { background: #ede9fe; color: #5b21b6; }
+
+/* Reliable command queue — deploy_results.status values. "running"/"ok" are
+   still-in-progress/success states not previously styled; "cancelled" was
+   already a possible value but never had a badge either. */
+.badge-running  { background: #dbeafe; color: #1e40af; }
+.badge-ok       { background: #dcfce7; color: #166534; }
+.badge-expired  { background: #f1f5f9; color: #475569; }
+.badge-failed   { background: #fee2e2; color: #991b1b; }
+.badge-cancelled { background: #f1f5f9; color: #475569; }
 
 .badge-pending_review { background: #fef3c7; color: #92400e; }
 .badge-allowed         { background: #dcfce7; color: #166534; }
@@ -411,11 +440,17 @@ select.badge {
 .result-row { display: flex; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .result-row:last-child { border-bottom: none; }
 .result-status { font-weight: 700; min-width: 60px; }
-.result-status.success { color: var(--green); }
-.result-status.error   { color: var(--red); }
-.result-status.pending { color: var(--muted); }
+.result-status.success,
+.result-status.ok       { color: var(--green); }
+.result-status.error,
+.result-status.failed   { color: var(--red); }
+.result-status.pending,
+.result-status.running,
+.result-status.expired,
+.result-status.cancelled { color: var(--muted); }
 .result-agent  { min-width: 140px; font-family: monospace; }
 .result-output { font-family: monospace; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+.result-meta   { font-size: 11px; color: var(--muted); flex-shrink: 0; white-space: nowrap; }
 
 /* ── Alerts ───────────────────────────────────────────────────────────────── */
 .alert-item {

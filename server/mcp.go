@@ -192,7 +192,8 @@ func dispatchPCJob(db *DB, deployer *Deployer, hostname, jobType, payload, args,
 		return nil, err
 	}
 
-	job, err := deployer.CreateJob(jobType, payload, args, []string{agent.ID})
+	job, err := deployer.CreateJob(jobType, payload, args, []string{agent.ID},
+		0, nil, deployer.DefaultMaxRetry(), "mcp")
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +214,8 @@ func queryDeepFreezeStatus(ctx context.Context, db *DB, deployer *Deployer, host
 		return nil, err
 	}
 
-	job, err := deployer.CreateJob("deepfreeze", "query_df", "", []string{agent.ID})
+	job, err := deployer.CreateJob("deepfreeze", "query_df", "", []string{agent.ID},
+		0, nil, deployer.DefaultMaxRetry(), "mcp")
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +236,7 @@ func queryDeepFreezeStatus(ctx context.Context, db *DB, deployer *Deployer, host
 		results, err := db.GetDeployResultsByJobID(job.ID)
 		if err == nil {
 			for _, r := range results {
-				if r.AgentID == agent.ID && r.Status != "pending" {
+				if r.AgentID == agent.ID && !isPendingLikeStatus(r.Status) {
 					return parseDeepFreezeResult(agent.Hostname, r), nil
 				}
 			}
