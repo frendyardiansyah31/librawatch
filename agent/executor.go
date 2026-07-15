@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -72,22 +71,24 @@ func runPSCommand(psCmd string) psResult {
 func executeCommand(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	payload, _ := msg["payload"].(string)
+	attempt := msg["attempt"]
 
 	logMsg("INFO", "Executing command job=%s", jobID)
 
-	sendExecResult(agentID, jobID, runPSCommand(payload))
+	sendExecResult(agentID, jobID, attempt, runPSCommand(payload))
 }
 
 func deployFile(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	filename, _ := msg["filename"].(string)
 	args, _ := msg["args"].(string)
+	attempt := msg["attempt"]
 
 	logMsg("INFO", "Deploying file job=%s filename=%s", jobID, filename)
 
 	localPath, err := downloadFile(filename)
 	if err != nil {
-		sendExecResult(agentID, jobID, psResult{
+		sendExecResult(agentID, jobID, attempt, psResult{
 			Status: "error", Output: "download failed: " + err.Error(), ExitCode: -1,
 		})
 		return
@@ -107,10 +108,10 @@ func deployFile(agentID string, msg map[string]interface{}) {
 			safePath)
 	}
 
-	sendExecResult(agentID, jobID, runPSCommand(psCmd))
+	sendExecResult(agentID, jobID, attempt, runPSCommand(psCmd))
 }
 
-func sendExecResult(agentID, jobID string, r psResult) {
+func sendExecResult(agentID, jobID string, attempt interface{}, r psResult) {
 	output := r.Output
 	if len(output) > 4096 {
 		output = output[:4096] + "...[truncated]"
@@ -119,11 +120,11 @@ func sendExecResult(agentID, jobID string, r psResult) {
 		"type":        "exec_result",
 		"agent_id":    agentID,
 		"job_id":      jobID,
+		"attempt":     attempt,
 		"status":      r.Status,
 		"output":      output,
 		"exit_code":   r.ExitCode,
 		"duration_ms": r.DurationMS,
 	}
-	data, _ := json.Marshal(msg)
-	wsSend(data)
+	sendDurableResult(jobID, msg)
 }

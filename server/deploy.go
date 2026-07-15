@@ -93,7 +93,7 @@ func (d *Deployer) CreateJob(jobType, payload, args string, targets []string,
 // concurrently (reconnect, job completion, lease sweep) — see
 // AcquireNextJob's comment for why no additional locking is needed.
 func (d *Deployer) PumpAgent(agentID string) bool {
-	job, err := d.db.AcquireNextJob(agentID, nowWIB().Add(d.leaseMinutes()))
+	job, attempt, err := d.db.AcquireNextJob(agentID, nowWIB().Add(d.leaseMinutes()))
 	if err != nil {
 		slog.Error("acquire next job failed", "agent_id", agentID, "error", err)
 		return false
@@ -101,10 +101,10 @@ func (d *Deployer) PumpAgent(agentID string) bool {
 	if job == nil {
 		return false
 	}
-	if !d.dispatch(agentID, job) {
+	if !d.dispatch(agentID, job, attempt) {
 		// Agent went offline between claim and send — release the claim with
 		// no retry charged, since it never actually received anything.
-		if err := d.db.UpdateDeployResult(job.ID, agentID, "pending", "", nil, nil, nil); err != nil {
+		if _, err := d.db.UpdateDeployResult(job.ID, agentID, "pending", "", nil, nil, nil, nil); err != nil {
 			slog.Error("release claim failed", "job_id", job.ID, "agent_id", agentID, "error", err)
 		}
 		return false
@@ -157,14 +157,14 @@ func (d *Deployer) sweepExpiredLeases() {
 	}
 	for _, r := range expired {
 		if r.RetryCount+1 > r.MaxRetry {
-			if err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "failed",
-				"Lease timeout: retry limit exceeded", nil, nil, nil); err != nil {
+			if _, err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "failed",
+				"Lease timeout: retry limit exceeded", nil, nil, nil, nil); err != nil {
 				slog.Error("fail expired lease failed", "job_id", r.JobID, "agent_id", r.AgentID, "error", err)
 			}
 		} else {
 			newRetryCount := r.RetryCount + 1
-			if err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "pending",
-				"Lease timeout: retrying", nil, nil, &newRetryCount); err != nil {
+			if _, err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "pending",
+				"Lease timeout: retrying", nil, nil, &newRetryCount, nil); err != nil {
 				slog.Error("requeue expired lease failed", "job_id", r.JobID, "agent_id", r.AgentID, "error", err)
 			}
 			// The agent may still be connected (hung command, dropped WS
@@ -188,8 +188,8 @@ func (d *Deployer) sweepExpiredPending() {
 		return
 	}
 	for _, r := range rows {
-		if err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "expired",
-			"Expired before execution", nil, nil, nil); err != nil {
+		if _, err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "expired",
+			"Expired before execution", nil, nil, nil, nil); err != nil {
 			slog.Error("expire pending result failed", "job_id", r.JobID, "agent_id", r.AgentID, "error", err)
 		}
 		if err := d.db.UpdateJobStatus(r.JobID); err != nil {
@@ -199,10 +199,16 @@ func (d *Deployer) sweepExpiredPending() {
 }
 
 // dispatch sends a job to a single agent via WebSocket. Returns true if the agent was online.
-func (d *Deployer) dispatch(agentID string, job *DeployJob) bool {
+// attempt is the retry_count current at claim time, echoed back by the agent
+// on its result so the server can fence a late ack against a since-superseded
+// attempt (see UpdateDeployResult) — set on every job type, since any of them
+// (not just adapter-toggle commands) can disrupt the agent's own connectivity
+// (e.g. Deep Freeze freeze/thaw reboots the PC).
+func (d *Deployer) dispatch(agentID string, job *DeployJob, attempt int) bool {
 	msg := &OutgoingMessage{
 		Type:    job.Type,
 		JobID:   job.ID,
+		Attempt: &attempt,
 		Payload: job.Payload,
 		Args:    job.Args,
 	}

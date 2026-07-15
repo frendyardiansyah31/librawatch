@@ -40,6 +40,7 @@ type IncomingMessage struct {
 	DiskCapacityGB float64 `json:"disk_capacity_gb"`
 	// exec_result / log_result fields
 	JobID      string `json:"job_id"`
+	Attempt    *int   `json:"attempt,omitempty"`
 	Status     string `json:"status"`
 	Output     string `json:"output"`
 	ExitCode   *int   `json:"exit_code,omitempty"`
@@ -53,6 +54,7 @@ type IncomingMessage struct {
 type OutgoingMessage struct {
 	Type     string `json:"type"`
 	JobID    string `json:"job_id,omitempty"`
+	Attempt  *int   `json:"attempt,omitempty"`
 	Payload  string `json:"payload,omitempty"`
 	Filename string `json:"filename,omitempty"`
 	Args     string `json:"args,omitempty"`
@@ -351,10 +353,27 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 	if len(output) > 4096 {
 		output = output[:4096] + "...[truncated]"
 	}
-	if err := h.db.UpdateDeployResult(msg.JobID, msg.AgentID, msg.Status, output, msg.ExitCode, msg.DurationMS, nil); err != nil {
+	affected, err := h.db.UpdateDeployResult(msg.JobID, msg.AgentID, msg.Status, output, msg.ExitCode, msg.DurationMS, nil, msg.Attempt)
+	if err != nil {
 		slog.Error("update deploy result failed", "job_id", msg.JobID, "error", err)
+		// A genuine DB error means the result wasn't durably recorded — don't
+		// ack, so the agent retries delivery on its next reconnect.
 		return
 	}
+
+	// The message was received and processed either way — ack now so the
+	// agent's local pending-result store stops retransmitting it, even if
+	// the row match below turns out to be stale (see next check). Without
+	// this, a late ack for an attempt the lease sweeper already superseded
+	// would keep being replayed by the agent forever.
+	h.SendToAgent(msg.AgentID, &OutgoingMessage{Type: "exec_result_ack", JobID: msg.JobID})
+
+	if affected == 0 {
+		slog.Warn("exec_result ignored: stale attempt or cancelled job",
+			"job_id", msg.JobID, "agent_id", msg.AgentID, "attempt", msg.Attempt)
+		return
+	}
+
 	slog.Info("result received",
 		"type", msg.Type,
 		"job_id", msg.JobID,

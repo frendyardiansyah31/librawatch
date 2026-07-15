@@ -9,12 +9,13 @@ import (
 )
 
 const (
-	agentBaseDir  = `C:\LibraryAgent`
-	idFile        = `C:\LibraryAgent\id.txt`
-	meshIDFile    = `C:\LibraryAgent\mesh_id.txt`
-	tokenFile     = `C:\LibraryAgent\token.txt`
-	agentLogFile  = `C:\LibraryAgent\agent.log`
-	defaultServer = "ws://10.5.39.86:8080/ws"
+	agentBaseDir    = `C:\LibraryAgent`
+	idFile          = `C:\LibraryAgent\id.txt`
+	meshIDFile      = `C:\LibraryAgent\mesh_id.txt`
+	tokenFile       = `C:\LibraryAgent\token.txt`
+	agentLogFile    = `C:\LibraryAgent\agent.log`
+	pendingAcksFile = `C:\LibraryAgent\pending_acks.json`
+	defaultServer   = "ws://10.5.39.86:8080/ws"
 )
 
 // getServerURL returns the WebSocket server URL.

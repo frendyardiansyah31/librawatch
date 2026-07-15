@@ -14,6 +14,7 @@ import (
 func handleInstallSSH(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	adminIP, _ := msg["args"].(string) // admin IP passed via "args" field (optional)
+	attempt := msg["attempt"]
 
 	logMsg("INFO", "InstallSSH: start job_id=%s admin_ip=%s", jobID, adminIP)
 
@@ -29,14 +30,14 @@ func handleInstallSSH(agentID string, msg map[string]interface{}) {
 	}
 
 	sendResult := func(status, output string) {
-		resp, _ := json.Marshal(map[string]interface{}{
+		sendDurableResult(jobID, map[string]interface{}{
 			"type":     "exec_result",
 			"agent_id": agentID,
 			"job_id":   jobID,
+			"attempt":  attempt,
 			"status":   status,
 			"output":   output,
 		})
-		wsSend(resp)
 	}
 
 	steps := []struct {

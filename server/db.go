@@ -1008,12 +1008,25 @@ func scanDeployResult(rows *sql.Rows) (DeployResult, error) {
 // always cleared — every transition here either finishes the row or sends it
 // back to a fresh pending state, so a stale lease never lingers. Guarded so a
 // late real agent reply can never overwrite an admin cancellation.
-func (db *DB) UpdateDeployResult(jobID, agentID, status, output string, exitCode *int, durationMS *int64, retryCount *int) error {
+//
+// expectedAttempt fences an agent's ack against the retry_count that was
+// current when the job was dispatched to it: nil skips the check (used by
+// server-internal transitions — dispatch release, lease-sweep requeue/fail,
+// pending-expiry — which originate a new attempt rather than acking one).
+// A non-nil value that no longer matches the row's current retry_count means
+// the lease sweeper has already requeued this job as a new attempt since the
+// agent picked it up — most likely because the ack for THIS attempt was lost
+// (e.g. the command disabled the network adapter carrying the ack) and the
+// row was reset before the late ack arrived. Rejecting it here (0 rows
+// affected) stops that stale ack from clobbering the newer attempt's state.
+// Returns the number of rows the UPDATE actually matched, so callers can
+// distinguish "applied" from "ignored as stale".
+func (db *DB) UpdateDeployResult(jobID, agentID, status, output string, exitCode *int, durationMS *int64, retryCount *int, expectedAttempt *int) (int64, error) {
 	var executedAt interface{}
 	if !isPendingLikeStatus(status) {
 		executedAt = fmtTime(nowWIB())
 	}
-	_, err := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE deploy_results SET
 			status = ?, output = ?,
 			exit_code = COALESCE(?, exit_code),
@@ -1022,8 +1035,12 @@ func (db *DB) UpdateDeployResult(jobID, agentID, status, output string, exitCode
 			lease_until = NULL,
 			executed_at = COALESCE(?, executed_at)
 		WHERE job_id = ? AND agent_id = ? AND status <> 'cancelled'
-	`, status, output, exitCode, durationMS, retryCount, executedAt, jobID, agentID)
-	return err
+			AND (? IS NULL OR retry_count = ?)
+	`, status, output, exitCode, durationMS, retryCount, executedAt, jobID, agentID, expectedAttempt, expectedAttempt)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // UpdateJobStatus marks a job "done" once none of its per-agent results are
@@ -1048,12 +1065,17 @@ func (db *DB) UpdateJobStatus(jobID string) error {
 // (SetMaxOpenConns(1) in initDB) means this transaction blocks every other
 // goroutine's DB call for its duration, so two concurrent callers (agent
 // reconnect, job completion, lease sweep) can never both claim a job for the
-// same computer. Returns (nil, nil) if the agent already has a running job,
-// or has nothing pending.
-func (db *DB) AcquireNextJob(agentID string, leaseUntil time.Time) (*DeployJob, error) {
+// same computer. Returns (nil, 0, nil) if the agent already has a running
+// job, or has nothing pending.
+//
+// Also returns the claimed row's retry_count, which the caller threads
+// through to the agent as an attempt fencing token (see UpdateDeployResult)
+// so a later ack can be matched against the exact attempt it was dispatched
+// for.
+func (db *DB) AcquireNextJob(agentID string, leaseUntil time.Time) (*DeployJob, int, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer tx.Rollback()
 
@@ -1061,36 +1083,38 @@ func (db *DB) AcquireNextJob(agentID string, leaseUntil time.Time) (*DeployJob, 
 	if err := tx.QueryRow(
 		`SELECT COUNT(*) FROM deploy_results WHERE agent_id = ? AND status = 'running'`, agentID,
 	).Scan(&inFlight); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if inFlight > 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	var jobID string
+	var retryCount int
 	err = tx.QueryRow(`
-		SELECT j.id FROM deploy_jobs j JOIN deploy_results r ON j.id = r.job_id
+		SELECT j.id, r.retry_count FROM deploy_jobs j JOIN deploy_results r ON j.id = r.job_id
 		WHERE r.agent_id = ? AND r.status = 'pending'
 		ORDER BY j.priority DESC, j.created_at ASC LIMIT 1
-	`, agentID).Scan(&jobID)
+	`, agentID).Scan(&jobID, &retryCount)
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if _, err := tx.Exec(
 		`UPDATE deploy_results SET status = 'running', lease_until = ? WHERE job_id = ? AND agent_id = ?`,
 		fmtTime(leaseUntil), jobID, agentID,
 	); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return db.GetDeployJobByID(jobID)
+	job, err := db.GetDeployJobByID(jobID)
+	return job, retryCount, err
 }
 
 // GetExpiredLeaseResults returns every 'running' result whose lease has

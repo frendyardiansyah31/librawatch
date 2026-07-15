@@ -361,6 +361,7 @@ func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error
 	if err := sendMetrics(agentID); err != nil {
 		return fmt.Errorf("initial metrics: %w", err)
 	}
+	replayPendingResults()
 
 	done := make(chan error, 1)
 	go func() {
@@ -444,6 +445,8 @@ func handleServerMessage(agentID string, data []byte) {
 		go handleInstallSSH(agentID, msg)
 	case "delete_file":
 		go handleDeleteFile(agentID, msg)
+	case "exec_result_ack":
+		go clearPendingResult(jobID)
 	}
 }
 

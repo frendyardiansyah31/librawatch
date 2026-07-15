@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,18 +14,19 @@ func handleDeepFreeze(agentID string, msg map[string]interface{}) {
 	action, _ := msg["action"].(string)
 	password, _ := msg["password"].(string)
 	jobID, _ := msg["job_id"].(string)
+	attempt := msg["attempt"]
 
 	logMsg("INFO", "DeepFreeze: action=%s job_id=%s", action, jobID)
 
 	send := func(status, output string) {
-		resp, _ := json.Marshal(map[string]interface{}{
+		sendDurableResult(jobID, map[string]interface{}{
 			"type":     "deepfreeze_result",
 			"agent_id": agentID,
 			"job_id":   jobID,
+			"attempt":  attempt,
 			"status":   status,
 			"output":   output,
 		})
-		wsSend(resp)
 	}
 
 	if _, err := os.Stat(dfcPath); err != nil {
