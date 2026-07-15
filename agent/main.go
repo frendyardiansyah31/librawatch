@@ -447,6 +447,9 @@ func handleServerMessage(agentID string, data []byte) {
 		go handleDeleteFile(agentID, msg)
 	case "exec_result_ack":
 		go clearPendingResult(jobID)
+	case "network_mode":
+		mode, _ := msg["network_mode"].(string)
+		go reconcileNetworkMode(agentID, mode)
 	}
 }
 

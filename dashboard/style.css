@@ -151,6 +151,9 @@ main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
 .btn-danger { border-color: var(--red) !important; color: var(--red) !important; }
 .btn-danger:hover { background: var(--red) !important; color: #fff !important; }
 
+.network-mode-control { display: flex; gap: 6px; }
+.btn-network-mode-active { border-color: var(--blue) !important; color: var(--blue) !important; }
+
 .btn-close { background: none; border: none; font-size: 18px; color: var(--muted); padding: 4px; line-height: 1; }
 .btn-close:hover { color: var(--text); }
 

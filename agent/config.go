@@ -78,3 +78,33 @@ func loadToken() string {
 	}
 	return strings.TrimSpace(string(data))
 }
+
+// wifiAdapterName and ethernetAdapterName resolve which Windows adapter name
+// network.go's reconciliation targets. Priority: env var > override file >
+// default. Fixed-name matching (rather than MediaType/InterfaceDescription
+// heuristics) is deliberate: this fleet is a small set of identically-imaged
+// PCs, so standardizing two adapter names is a one-time, cheap step, and a
+// clean "adapter not found" is a much safer failure mode than a heuristic
+// that could misidentify a virtual adapter (Hyper-V vEthernet, VPN TAP,
+// Bluetooth PAN) as the real NIC during an unattended, connectivity-affecting
+// change.
+func wifiAdapterName() string {
+	return resolveAdapterName("LIBRARY_WIFI_ADAPTER", "wifi_adapter.txt", "Wi-Fi")
+}
+
+func ethernetAdapterName() string {
+	return resolveAdapterName("LIBRARY_ETHERNET_ADAPTER", "ethernet_adapter.txt", "Ethernet")
+}
+
+func resolveAdapterName(envVar, overrideFile, def string) string {
+	if name := os.Getenv(envVar); name != "" {
+		return name
+	}
+	data, err := os.ReadFile(filepath.Join(agentBaseDir, overrideFile))
+	if err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" {
+			return name
+		}
+	}
+	return def
+}

@@ -282,6 +282,44 @@ function buildDeviceProfile(ag) {
   </table>`;
 }
 
+const NETWORK_MODE_LABELS = { ethernet: 'Ethernet', wifi: 'WiFi', both: 'Keduanya' };
+
+function buildNetworkModeControl(ag) {
+  if (!ag) return '';
+  const desired = ag.desired_network_mode || 'both';
+  const buttons = Object.entries(NETWORK_MODE_LABELS).map(([mode, label]) => `
+    <button class="btn-sm ${mode === desired ? 'btn-network-mode-active' : ''}"
+      onclick="setNetworkMode('${esc(ag.id)}', '${mode}', this)">${label}</button>`).join('');
+  const statusText = ag.current_network_mode
+    ? `Status: ${esc(NETWORK_MODE_LABELS[ag.current_network_mode] || ag.current_network_mode)}`
+      + (ag.network_mode_status && ag.network_mode_status !== 'ok' ? ` (${esc(ag.network_mode_status)})` : '')
+    : 'Status: belum ada laporan dari agent';
+  return `<div class="network-mode-control">${buttons}</div>
+    <p class="no-data" style="margin-top:6px">${statusText}</p>`;
+}
+
+async function setNetworkMode(agentID, mode, btn) {
+  if (!confirm(`Set mode jaringan PC ini ke "${NETWORK_MODE_LABELS[mode]}"?`)) return;
+  btn.disabled = true;
+  try {
+    const res = await api('POST', `/agents/${agentID}/network-mode`, { mode });
+    const ag = allAgents.find(a => a.id === agentID);
+    if (ag) {
+      ag.desired_network_mode = mode;
+      if (res.result) {
+        ag.current_network_mode = res.result.network_mode;
+        ag.network_mode_status = res.result.status;
+      }
+    }
+    const tr = document.getElementById('detail-' + agentID);
+    if (tr) loadAgentDetail(agentID, tr);
+  } catch (e) {
+    alert('Gagal set mode jaringan: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function buildEventList(events) {
   if (!events || !events.length) return '<p class="no-data">Belum ada event tercatat</p>';
   const rows = events.slice(0, 10).map(e => `
@@ -311,6 +349,8 @@ async function loadAgentDetail(id, tr) {
           ${buildSparklines(metrics)}
           <h4 style="margin-top:14px">Profil Perangkat</h4>
           ${buildDeviceProfile(ag)}
+          <h4 style="margin-top:14px">Mode Jaringan</h4>
+          ${buildNetworkModeControl(ag)}
         </div>
         <div>
           <h4>Proses Aktif (${(procs||[]).length})</h4>

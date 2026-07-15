@@ -37,6 +37,12 @@ var validPolicyActions = map[string]bool{
 	PolicyActionKill:   true,
 }
 
+var validNetworkModes = map[string]bool{
+	"ethernet": true,
+	"wifi":     true,
+	"both":     true,
+}
+
 // wingetIDRe matches valid winget package IDs: Publisher.AppName style.
 // Allows letters, digits, dots, dashes, underscores, plus signs.
 var wingetIDRe = regexp.MustCompile(`^[A-Za-z0-9][\w.\-+]*$`)
@@ -142,6 +148,47 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		}
 		db.InsertAuditLog("kill_process", agentID, fmt.Sprintf("pid=%d name=%s", req.PID, req.Name), c.ClientIP())
 		c.JSON(http.StatusOK, gin.H{"output": output})
+	})
+
+	// POST /agents/:id/network-mode sets the persisted desired network mode
+	// and, if the agent is online, pushes it immediately and waits briefly
+	// for the reconciliation result. The mode is always persisted first, so
+	// an offline agent (or a timed-out push) still converges automatically
+	// the next time it connects — no separate retry mechanism is needed.
+	api.POST("/agents/:id/network-mode", func(c *gin.Context) {
+		var req struct {
+			Mode string `json:"mode"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || !validNetworkModes[req.Mode] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "mode must be one of: ethernet, wifi, both"})
+			return
+		}
+		agentID := c.Param("id")
+		if err := db.SetAgentDesiredNetworkMode(agentID, req.Mode); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		db.InsertAuditLog("set_network_mode", agentID, req.Mode, c.ClientIP())
+
+		result, online, err := hub.SetNetworkMode(agentID, req.Mode)
+		if !online {
+			c.JSON(http.StatusOK, gin.H{
+				"ok": true, "desired_network_mode": req.Mode, "applied_live": false,
+				"message": "agent offline; will reconcile automatically on next connect",
+			})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"ok": true, "desired_network_mode": req.Mode, "applied_live": false,
+				"message": err.Error(),
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"ok": true, "desired_network_mode": req.Mode, "applied_live": true,
+			"result": gin.H{"network_mode": result.Mode, "status": result.Status, "output": result.Output},
+		})
 	})
 
 	api.GET("/agents/:id/processes", func(c *gin.Context) {

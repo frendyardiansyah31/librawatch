@@ -45,6 +45,8 @@ type IncomingMessage struct {
 	Output     string `json:"output"`
 	ExitCode   *int   `json:"exit_code,omitempty"`
 	DurationMS *int64 `json:"duration_ms,omitempty"`
+	// network_mode_result field (reuses Status/Output above for the outcome)
+	NetworkMode string `json:"network_mode"`
 	// event fields (Phase 2 — usb_inserted, download_created, etc; see server/events.go)
 	EventType string                 `json:"event_type"`
 	Metadata  map[string]interface{} `json:"metadata"`
@@ -64,6 +66,8 @@ type OutgoingMessage struct {
 	PID      int    `json:"pid,omitempty"`       // kill_process: target PID
 	ProcName string `json:"proc_name,omitempty"` // kill_process: fallback by name
 	Path     string `json:"path,omitempty"`      // delete_file: absolute path to remove
+
+	NetworkMode string `json:"network_mode,omitempty"` // network_mode: desired ethernet/wifi/both
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
@@ -142,10 +146,19 @@ type Hub struct {
 	catalog       *Catalog
 	policyEngine  *PolicyEngine
 	events        *EventRecorder
-	authToken     string   // if non-empty, WebSocket clients must provide ?token=
-	lastMetricLog sync.Map // agentID → time.Time, throttle log to every 5 min
-	logWaiters    sync.Map // agentID → chan string, pending log relay
-	killWaiters   sync.Map // agentID → chan string, pending kill result
+	authToken          string   // if non-empty, WebSocket clients must provide ?token=
+	lastMetricLog      sync.Map // agentID → time.Time, throttle log to every 5 min
+	logWaiters         sync.Map // agentID → chan string, pending log relay
+	killWaiters        sync.Map // agentID → chan string, pending kill result
+	networkModeWaiters sync.Map // agentID → chan networkModeResult, pending network_mode result
+}
+
+// networkModeResult is the agent's self-reported outcome of a network-mode
+// reconciliation attempt (see agent/network.go).
+type networkModeResult struct {
+	Mode   string
+	Status string
+	Output string
 }
 
 func NewHub(db *DB) *Hub {
@@ -241,6 +254,8 @@ func (h *Hub) handleMessage(c *Client, data []byte) {
 		h.handleEvent(c, &msg)
 	case "delete_file_result":
 		slog.Info("delete_file result", "agent_id", msg.AgentID, "output", msg.Output)
+	case "network_mode_result":
+		h.handleNetworkModeResult(&msg)
 	}
 }
 
@@ -288,6 +303,17 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 
 		if h.deployer != nil {
 			go h.deployer.DispatchPending(msg.AgentID)
+		}
+
+		// Push the persisted desired network mode on every fresh connection
+		// (first connect, reconnect, or agent restart) — the agent reconciles
+		// idempotently, so resending here on every session start is exactly
+		// the recovery mechanism needed if a prior reconciliation result was
+		// never delivered, with no retry/lease bookkeeping required.
+		if mode, err := h.db.GetAgentDesiredNetworkMode(msg.AgentID); err == nil {
+			h.SendToAgent(msg.AgentID, &OutgoingMessage{Type: "network_mode", NetworkMode: mode})
+		} else {
+			slog.Error("get desired network mode failed", "agent_id", msg.AgentID, "error", err)
 		}
 	}
 
@@ -450,6 +476,49 @@ func (h *Hub) KillProcess(agentID string, pid int, name string) (string, error) 
 		return output, nil
 	case <-time.After(10 * time.Second):
 		return "", fmt.Errorf("kill request timed out")
+	}
+}
+
+// handleNetworkModeResult persists the agent's self-reported reconciliation
+// outcome (unlike kill/log results, which are fire-and-forget) and, if an
+// admin API call is synchronously waiting on it, delivers it there too.
+func (h *Hub) handleNetworkModeResult(msg *IncomingMessage) {
+	if msg.AgentID == "" {
+		return
+	}
+	detail := msg.Output
+	if len(detail) > 2048 {
+		detail = detail[:2048] + "...[truncated]"
+	}
+	if err := h.db.UpdateAgentNetworkModeResult(msg.AgentID, msg.NetworkMode, msg.Status, detail); err != nil {
+		slog.Error("update network mode result failed", "agent_id", msg.AgentID, "error", err)
+	}
+	if v, ok := h.networkModeWaiters.Load(msg.AgentID); ok {
+		select {
+		case v.(chan networkModeResult) <- networkModeResult{Mode: msg.NetworkMode, Status: msg.Status, Output: detail}:
+		default:
+		}
+	}
+}
+
+// SetNetworkMode pushes a desired network mode to agentID and waits (briefly)
+// for its reconciliation result. online=false means the agent wasn't
+// connected to receive the push — not an error, since the desired mode is
+// persisted by the caller regardless and will be reconciled on next connect.
+func (h *Hub) SetNetworkMode(agentID, mode string) (result networkModeResult, online bool, err error) {
+	ch := make(chan networkModeResult, 1)
+	h.networkModeWaiters.Store(agentID, ch)
+	defer h.networkModeWaiters.Delete(agentID)
+
+	if !h.SendToAgent(agentID, &OutgoingMessage{Type: "network_mode", NetworkMode: mode}) {
+		return networkModeResult{}, false, nil
+	}
+
+	select {
+	case r := <-ch:
+		return r, true, nil
+	case <-time.After(30 * time.Second):
+		return networkModeResult{}, true, fmt.Errorf("network mode request timed out")
 	}
 }
 

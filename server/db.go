@@ -60,6 +60,15 @@ type Agent struct {
 	WindowsVersion string    `json:"windows_version"`
 	DiskCapacityGB float64   `json:"disk_capacity_gb"`
 	DeviceGroup    string    `json:"device_group"`
+
+	// Desired-state network mode reconciliation (see agent/network.go).
+	// DesiredNetworkMode is admin-set and drives agent behavior; the rest
+	// reflect the agent's last self-reported reconciliation outcome.
+	DesiredNetworkMode   string    `json:"desired_network_mode"`
+	CurrentNetworkMode   string    `json:"current_network_mode"`
+	NetworkModeStatus    string    `json:"network_mode_status"`
+	NetworkModeDetail    string    `json:"network_mode_detail"`
+	NetworkModeUpdatedAt time.Time `json:"network_mode_updated_at"`
 }
 
 type AgentWithMetrics struct {
@@ -475,6 +484,11 @@ func (db *DB) migrate() error {
 		{"windows_version", "TEXT NOT NULL DEFAULT ''"},
 		{"disk_capacity_gb", "REAL NOT NULL DEFAULT 0"},
 		{"device_group", "TEXT NOT NULL DEFAULT ''"},
+		{"desired_network_mode", "TEXT NOT NULL DEFAULT 'both'"},
+		{"current_network_mode", "TEXT NOT NULL DEFAULT ''"},
+		{"network_mode_status", "TEXT NOT NULL DEFAULT ''"},
+		{"network_mode_detail", "TEXT NOT NULL DEFAULT ''"},
+		{"network_mode_updated_at", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("agents", col.name, col.decl); err != nil {
 			return fmt.Errorf("add column agents.%s: %w", col.name, err)
@@ -583,6 +597,8 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 		SELECT
 			a.id, a.hostname, a.ip, a.os, a.last_seen, a.mesh_id, a.status, a.created_at,
 			a.agent_version, a.windows_version, a.disk_capacity_gb, a.device_group,
+			a.desired_network_mode, a.current_network_mode, a.network_mode_status,
+			a.network_mode_detail, a.network_mode_updated_at,
 			COALESCE((SELECT cpu  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
 			COALESCE((SELECT ram  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
 			COALESCE((SELECT name FROM processes WHERE agent_id = a.id ORDER BY recorded_at DESC, cpu DESC LIMIT 1), ''),
@@ -599,11 +615,13 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 	result := make([]AgentWithMetrics, 0)
 	for rows.Next() {
 		var a AgentWithMetrics
-		var lastSeen, createdAt string
+		var lastSeen, createdAt, networkModeUpdatedAt string
 		if err := rows.Scan(
 			&a.ID, &a.Hostname, &a.IP, &a.OS,
 			&lastSeen, &a.MeshID, &a.Status, &createdAt,
 			&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB, &a.DeviceGroup,
+			&a.DesiredNetworkMode, &a.CurrentNetworkMode, &a.NetworkModeStatus,
+			&a.NetworkModeDetail, &networkModeUpdatedAt,
 			&a.CPU, &a.RAM, &a.TopProcess,
 			&a.InstalledSoftwareCount, &a.RunningProcessCount,
 		); err != nil {
@@ -611,6 +629,7 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 		}
 		a.LastSeen = parseDBTime(lastSeen)
 		a.CreatedAt = parseDBTime(createdAt)
+		a.NetworkModeUpdatedAt = parseDBTime(networkModeUpdatedAt)
 		result = append(result, a)
 	}
 	return result, rows.Err()
@@ -618,12 +637,15 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 
 func (db *DB) GetAgentByID(id string) (*AgentWithMetrics, error) {
 	var a AgentWithMetrics
-	var lastSeen, createdAt string
+	var lastSeen, createdAt, networkModeUpdatedAt string
 	err := db.QueryRow(
-		`SELECT id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb, device_group
+		`SELECT id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb, device_group,
+		 	desired_network_mode, current_network_mode, network_mode_status, network_mode_detail, network_mode_updated_at
 		 FROM agents WHERE id = ?`, id,
 	).Scan(&a.ID, &a.Hostname, &a.IP, &a.OS, &lastSeen, &a.MeshID, &a.Status, &createdAt,
-		&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB, &a.DeviceGroup)
+		&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB, &a.DeviceGroup,
+		&a.DesiredNetworkMode, &a.CurrentNetworkMode, &a.NetworkModeStatus,
+		&a.NetworkModeDetail, &networkModeUpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -632,6 +654,7 @@ func (db *DB) GetAgentByID(id string) (*AgentWithMetrics, error) {
 	}
 	a.LastSeen = parseDBTime(lastSeen)
 	a.CreatedAt = parseDBTime(createdAt)
+	a.NetworkModeUpdatedAt = parseDBTime(networkModeUpdatedAt)
 
 	var cpu, ram float64
 	if err := db.QueryRow(
@@ -684,6 +707,32 @@ func (db *DB) GetAgentDeviceGroup(id string) (string, error) {
 		return "", nil
 	}
 	return group, err
+}
+
+func (db *DB) SetAgentDesiredNetworkMode(id, mode string) error {
+	_, err := db.Exec(`UPDATE agents SET desired_network_mode = ? WHERE id = ?`, mode, id)
+	return err
+}
+
+// GetAgentDesiredNetworkMode defaults to "both" (no restriction) when the
+// agent row can't be found, mirroring the column's own DB default.
+func (db *DB) GetAgentDesiredNetworkMode(id string) (string, error) {
+	var mode string
+	err := db.QueryRow(`SELECT desired_network_mode FROM agents WHERE id = ?`, id).Scan(&mode)
+	if err == sql.ErrNoRows {
+		return "both", nil
+	}
+	return mode, err
+}
+
+// UpdateAgentNetworkModeResult records the agent's self-reported outcome of
+// its last network-mode reconciliation attempt (see agent/network.go).
+func (db *DB) UpdateAgentNetworkModeResult(id, mode, status, detail string) error {
+	_, err := db.Exec(
+		`UPDATE agents SET current_network_mode = ?, network_mode_status = ?, network_mode_detail = ?, network_mode_updated_at = ? WHERE id = ?`,
+		mode, status, detail, fmtTime(nowWIB()), id,
+	)
+	return err
 }
 
 func (db *DB) GetAllAgentIDs() ([]string, error) {
