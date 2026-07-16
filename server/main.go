@@ -304,6 +304,9 @@ func main() {
 	api.POST("/logout", handleLogout(authMgr, db))
 	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
 
+	apiV1 := r.Group("/api/v1", adminMiddleware, authMgr.Middleware())
+	apiV1.GET("/clients", handleGetClients(db))
+
 	// /mcp exposes MCP tools (e.g. get_online_pcs) for machine clients like
 	// OpenClaw. Protected by a static bearer token, same pattern as the
 	// WebSocket agent token above (empty = disabled).

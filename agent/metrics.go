@@ -48,11 +48,12 @@ type MetricsPayload struct {
 	AgentVersion   string        `json:"agent_version,omitempty"`
 	WindowsVersion string        `json:"windows_version,omitempty"`
 	DiskCapacityGB float64       `json:"disk_capacity_gb,omitempty"`
+	MacAddress     string        `json:"mac_address,omitempty"`
 }
 
 // collectMetrics gathers CPU%, RAM%, and every running process. Uses a 500ms
 // CPU sampling window on first call; subsequent calls use elapsed time.
-func collectMetrics(agentID, hostname, ip, osName, meshID string) (*MetricsPayload, error) {
+func collectMetrics(agentID, hostname, ip, osName, meshID, macAddress string) (*MetricsPayload, error) {
 	cpuPercents, err := cpu.Percent(500*time.Millisecond, false)
 	if err != nil {
 		return nil, err
@@ -116,6 +117,7 @@ func collectMetrics(agentID, hostname, ip, osName, meshID string) (*MetricsPaylo
 		AgentVersion:   agentVersion,
 		WindowsVersion: getWindowsVersion(),
 		DiskCapacityGB: getDiskCapacityGB(),
+		MacAddress:     macAddress,
 	}, nil
 }
 

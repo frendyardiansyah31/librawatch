@@ -33,6 +33,7 @@ var (
 	agentLogger   *log.Logger
 	hostname      string
 	agentIP       string
+	macAddress    string
 	meshID        string
 	serverBaseURL string
 )
@@ -177,6 +178,7 @@ func main() {
 		hostname = "unknown"
 	}
 	agentIP = getLocalIP()
+	macAddress = getMACAddress()
 	meshID = loadMeshID()
 
 	agentID, err := loadOrCreateID()
@@ -407,7 +409,7 @@ func sendMetrics(agentID string) error {
 	if current := getLocalIP(); current != "unknown" {
 		agentIP = current
 	}
-	payload, err := collectMetrics(agentID, hostname, agentIP, agentOS, meshID)
+	payload, err := collectMetrics(agentID, hostname, agentIP, agentOS, meshID, macAddress)
 	if err != nil {
 		logMsg("ERROR", "Collect metrics: %v", err)
 		return nil

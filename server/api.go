@@ -207,6 +207,7 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		var req struct {
 			MeshID      *string `json:"mesh_id"`
 			DeviceGroup *string `json:"device_group"`
+			Floor       *string `json:"floor"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -225,6 +226,13 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 				return
 			}
 			db.InsertAuditLog("update_device_group", agentID, *req.DeviceGroup, c.ClientIP())
+		}
+		if req.Floor != nil {
+			if err := db.SetAgentFloor(agentID, *req.Floor); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			db.InsertAuditLog("update_floor", agentID, *req.Floor, c.ClientIP())
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})

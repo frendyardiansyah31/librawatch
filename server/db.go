@@ -60,6 +60,8 @@ type Agent struct {
 	WindowsVersion string    `json:"windows_version"`
 	DiskCapacityGB float64   `json:"disk_capacity_gb"`
 	DeviceGroup    string    `json:"device_group"`
+	MacAddress     string    `json:"mac_address"`
+	Floor          string    `json:"floor"`
 
 	// Desired-state network mode reconciliation (see agent/network.go).
 	// DesiredNetworkMode is admin-set and drives agent behavior; the rest
@@ -489,6 +491,8 @@ func (db *DB) migrate() error {
 		{"network_mode_status", "TEXT NOT NULL DEFAULT ''"},
 		{"network_mode_detail", "TEXT NOT NULL DEFAULT ''"},
 		{"network_mode_updated_at", "TEXT NOT NULL DEFAULT ''"},
+		{"mac_address", "TEXT NOT NULL DEFAULT ''"},
+		{"floor", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("agents", col.name, col.decl); err != nil {
 			return fmt.Errorf("add column agents.%s: %w", col.name, err)
@@ -575,8 +579,8 @@ func (db *DB) DeleteAgent(id string) error {
 
 func (db *DB) UpsertAgent(a *Agent) error {
 	_, err := db.Exec(`
-		INSERT INTO agents (id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO agents (id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb, mac_address)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			hostname         = excluded.hostname,
 			ip               = excluded.ip,
@@ -585,10 +589,11 @@ func (db *DB) UpsertAgent(a *Agent) error {
 			status           = excluded.status,
 			agent_version    = CASE WHEN excluded.agent_version   <> '' THEN excluded.agent_version   ELSE agents.agent_version   END,
 			windows_version  = CASE WHEN excluded.windows_version <> '' THEN excluded.windows_version ELSE agents.windows_version END,
-			disk_capacity_gb = CASE WHEN excluded.disk_capacity_gb <> 0 THEN excluded.disk_capacity_gb ELSE agents.disk_capacity_gb END
+			disk_capacity_gb = CASE WHEN excluded.disk_capacity_gb <> 0 THEN excluded.disk_capacity_gb ELSE agents.disk_capacity_gb END,
+			mac_address      = CASE WHEN excluded.mac_address     <> '' THEN excluded.mac_address     ELSE agents.mac_address     END
 	`, a.ID, a.Hostname, a.IP, a.OS,
 		fmtTime(a.LastSeen), a.MeshID, a.Status, fmtTime(a.CreatedAt),
-		a.AgentVersion, a.WindowsVersion, a.DiskCapacityGB)
+		a.AgentVersion, a.WindowsVersion, a.DiskCapacityGB, a.MacAddress)
 	return err
 }
 
@@ -599,6 +604,7 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 			a.agent_version, a.windows_version, a.disk_capacity_gb, a.device_group,
 			a.desired_network_mode, a.current_network_mode, a.network_mode_status,
 			a.network_mode_detail, a.network_mode_updated_at,
+			a.mac_address, a.floor,
 			COALESCE((SELECT cpu  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
 			COALESCE((SELECT ram  FROM metrics   WHERE agent_id = a.id ORDER BY recorded_at DESC LIMIT 1), 0.0),
 			COALESCE((SELECT name FROM processes WHERE agent_id = a.id ORDER BY recorded_at DESC, cpu DESC LIMIT 1), ''),
@@ -622,6 +628,7 @@ func (db *DB) GetAllAgents() ([]AgentWithMetrics, error) {
 			&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB, &a.DeviceGroup,
 			&a.DesiredNetworkMode, &a.CurrentNetworkMode, &a.NetworkModeStatus,
 			&a.NetworkModeDetail, &networkModeUpdatedAt,
+			&a.MacAddress, &a.Floor,
 			&a.CPU, &a.RAM, &a.TopProcess,
 			&a.InstalledSoftwareCount, &a.RunningProcessCount,
 		); err != nil {
@@ -640,12 +647,14 @@ func (db *DB) GetAgentByID(id string) (*AgentWithMetrics, error) {
 	var lastSeen, createdAt, networkModeUpdatedAt string
 	err := db.QueryRow(
 		`SELECT id, hostname, ip, os, last_seen, mesh_id, status, created_at, agent_version, windows_version, disk_capacity_gb, device_group,
-		 	desired_network_mode, current_network_mode, network_mode_status, network_mode_detail, network_mode_updated_at
+		 	desired_network_mode, current_network_mode, network_mode_status, network_mode_detail, network_mode_updated_at,
+		 	mac_address, floor
 		 FROM agents WHERE id = ?`, id,
 	).Scan(&a.ID, &a.Hostname, &a.IP, &a.OS, &lastSeen, &a.MeshID, &a.Status, &createdAt,
 		&a.AgentVersion, &a.WindowsVersion, &a.DiskCapacityGB, &a.DeviceGroup,
 		&a.DesiredNetworkMode, &a.CurrentNetworkMode, &a.NetworkModeStatus,
-		&a.NetworkModeDetail, &networkModeUpdatedAt)
+		&a.NetworkModeDetail, &networkModeUpdatedAt,
+		&a.MacAddress, &a.Floor)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -694,6 +703,11 @@ func (db *DB) SetAgentMeshID(id, meshID string) error {
 
 func (db *DB) SetAgentDeviceGroup(id, group string) error {
 	_, err := db.Exec(`UPDATE agents SET device_group = ? WHERE id = ?`, group, id)
+	return err
+}
+
+func (db *DB) SetAgentFloor(id, floor string) error {
+	_, err := db.Exec(`UPDATE agents SET floor = ? WHERE id = ?`, floor, id)
 	return err
 }
 

@@ -38,6 +38,7 @@ type IncomingMessage struct {
 	AgentVersion   string  `json:"agent_version"`
 	WindowsVersion string  `json:"windows_version"`
 	DiskCapacityGB float64 `json:"disk_capacity_gb"`
+	MacAddress     string  `json:"mac_address"`
 	// exec_result / log_result fields
 	JobID      string `json:"job_id"`
 	Attempt    *int   `json:"attempt,omitempty"`
@@ -329,6 +330,7 @@ func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
 		AgentVersion:   msg.AgentVersion,
 		WindowsVersion: msg.WindowsVersion,
 		DiskCapacityGB: msg.DiskCapacityGB,
+		MacAddress:     msg.MacAddress,
 	}
 	if err := h.db.UpsertAgent(agent); err != nil {
 		slog.Error("upsert agent failed", "agent_id", msg.AgentID, "error", err)
