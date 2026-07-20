@@ -166,6 +166,9 @@ function showTab(name) {
   } else if (name === 'events') {
     loadEvents();
     refreshTimer = setInterval(loadEvents, 15000);
+  } else if (name === 'floormap') {
+    loadFloorMap();
+    refreshTimer = setInterval(loadFloorMap, 10000);
   }
 }
 
@@ -970,6 +973,222 @@ function renderEvents(events) {
   }).join('');
 }
 
+// ── Floor Map Tab ─────────────────────────────────────────────────────────
+let computers = [];
+let computerElements = new Map();
+let currentComputerId = null;
+
+const STATUS_META = {
+  ONLINE_ACTIVE:  { label: 'Aktif' },
+  ONLINE_IDLE:    { label: 'Idle' },
+  ONLINE_UNUSED:  { label: 'Online (Tidak Dipakai)' },
+  OFFLINE:        { label: 'Offline' },
+  UNKNOWN:        { label: 'Tidak Diketahui' },
+};
+
+const CONNECTION_LABELS = { ethernet: 'LAN', wifi: 'WiFi' };
+
+// The backend has no idle/session tracking, only online/offline + a live
+// cpu reading, so activity level is approximated from CPU load rather than
+// real usage telemetry.
+function deriveStatus(agent) {
+  if (agent.status !== 'online') return 'OFFLINE';
+  if (agent.cpu === null || agent.cpu === undefined) return 'UNKNOWN';
+  if (agent.cpu >= 8) return 'ONLINE_ACTIVE';
+  if (agent.cpu > 0)  return 'ONLINE_IDLE';
+  return 'ONLINE_UNUSED';
+}
+
+// Data source today: the real /api/agents list, reshaped into the floor-map
+// computer schema. Swappable later for a dedicated /api/computers endpoint
+// or WebSocket feed without touching the renderer below.
+function mapAgentsToComputers(agents) {
+  const sorted = [...agents].sort((a, b) => (a.hostname || '').localeCompare(b.hostname || ''));
+  return sorted.map((ag, i) => {
+    const row = Math.floor(i / 8);
+    const posInRow = i % 8;
+    const x = posInRow < 4 ? 1 + posInRow : 6 + (posInRow - 4);
+    const y = 2 + row;
+    return {
+      id: ag.id,
+      name: 'PC-' + String(i + 1).padStart(2, '0'),
+      status: deriveStatus(ag),
+      x, y,
+      hostname: ag.hostname,
+      ip: ag.ip,
+      cpu: ag.cpu,
+      ram: ag.ram,
+      session: null,
+      idle: null,
+      lastSeen: ag.last_seen,
+      agentVersion: ag.agent_version,
+      os: ag.windows_version || ag.os,
+      connection: CONNECTION_LABELS[ag.current_network_mode] || '—',
+    };
+  });
+}
+
+function buildLandmarks(rowCount) {
+  const footerY = rowCount + 2;
+  return [
+    { type: 'entrance',  label: '🚪 Entrance',   x: 1, y: 1 },
+    { type: 'window',    label: '🪟 Window',     x: 3, y: 1, colSpan: 5 },
+    { type: 'stair',     label: '🪜 Stair',      x: 9, y: 1 },
+    { type: 'walkway',   label: 'Walkway',       x: 5, y: 2, rowSpan: rowCount },
+    { type: 'helpdesk',  label: '🛎 Help Desk',  x: 2, y: footerY },
+    { type: 'printer',   label: '🖨 Printer',    x: 5, y: footerY },
+    { type: 'bookshelf', label: '📚 Bookshelf',  x: 8, y: footerY },
+  ];
+}
+
+function makeLandmarkEl(lm) {
+  const div = document.createElement('div');
+  div.className = 'landmark' + (lm.type === 'walkway' ? ' landmark-walkway' : '');
+  div.textContent = lm.label;
+  div.style.gridColumn = lm.colSpan ? `${lm.x} / span ${lm.colSpan}` : String(lm.x);
+  div.style.gridRow = lm.rowSpan ? `${lm.y} / span ${lm.rowSpan}` : String(lm.y);
+  return div;
+}
+
+function makeComputerCard(c) {
+  const div = document.createElement('div');
+  div.className = 'pc-card status-' + c.status.toLowerCase();
+  div.style.gridColumn = String(c.x);
+  div.style.gridRow = String(c.y);
+  div.title = `${c.hostname || c.name} — ${(STATUS_META[c.status] || {}).label || c.status}`;
+  div.innerHTML = `<span class="pc-dot"></span><span class="pc-name">${esc(c.name)}</span>`;
+  div.addEventListener('click', () => openComputerModal(c.id));
+  return div;
+}
+
+// Full rebuild — only called on first load or when the set of agents
+// (added/removed) actually changes. Routine refreshes go through
+// updateComputer() instead so 100+ cards don't get re-created every poll.
+function renderFloorMap() {
+  const grid = document.getElementById('floor-map-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  computerElements.clear();
+
+  if (!computers.length) {
+    grid.style.gridTemplateRows = '';
+    grid.innerHTML = '<p class="empty">Belum ada agent yang terhubung</p>';
+    return;
+  }
+
+  const rowCount = Math.max(...computers.map(c => c.y)) - 1;
+  grid.style.gridTemplateRows = `repeat(${rowCount + 2}, 72px)`;
+
+  const frag = document.createDocumentFragment();
+  buildLandmarks(rowCount).forEach(lm => frag.appendChild(makeLandmarkEl(lm)));
+  computers.forEach(c => {
+    const card = makeComputerCard(c);
+    computerElements.set(c.id, card);
+    frag.appendChild(card);
+  });
+  grid.appendChild(frag);
+}
+
+// Hook point for future real-time updates (WebSocket push etc.) — patches
+// one card in place without touching the rest of the grid.
+function updateComputer(id, patch) {
+  const c = computers.find(x => x.id === id);
+  if (!c) return;
+  Object.assign(c, patch);
+  const el = computerElements.get(id);
+  if (!el) return;
+  el.className = 'pc-card status-' + c.status.toLowerCase();
+  el.title = `${c.hostname || c.name} — ${(STATUS_META[c.status] || {}).label || c.status}`;
+}
+
+function updateSummary() {
+  const total   = computers.length;
+  const offline = computers.filter(c => c.status === 'OFFLINE').length;
+  const active  = computers.filter(c => c.status === 'ONLINE_ACTIVE').length;
+  const idle    = computers.filter(c => c.status === 'ONLINE_IDLE').length;
+  const unused  = computers.filter(c => c.status === 'ONLINE_UNUSED').length;
+  document.getElementById('floor-stat-total').textContent   = total;
+  document.getElementById('floor-stat-online').textContent  = total - offline;
+  document.getElementById('floor-stat-offline').textContent = offline;
+  document.getElementById('floor-stat-active').textContent  = active;
+  document.getElementById('floor-stat-idle').textContent    = idle;
+  document.getElementById('floor-stat-unused').textContent  = unused;
+}
+
+function diffAndRenderFloorMap(newComputers) {
+  const prevIds = new Set(computers.map(c => c.id));
+  const sameSet = prevIds.size === newComputers.length && newComputers.every(c => prevIds.has(c.id));
+
+  computers = newComputers;
+
+  if (sameSet && computerElements.size) {
+    computers.forEach(c => updateComputer(c.id, c));
+  } else {
+    renderFloorMap();
+  }
+}
+
+async function loadFloorMap() {
+  try {
+    await loadAgents();
+    diffAndRenderFloorMap(mapAgentsToComputers(allAgents));
+    updateSummary();
+  } catch (e) {
+    console.error('loadFloorMap:', e);
+    const grid = document.getElementById('floor-map-grid');
+    if (grid) grid.innerHTML = `<p class="empty" style="color:#dc2626">Gagal memuat denah: ${esc(e.message)}</p>`;
+  }
+}
+
+function openComputerModal(id) {
+  const c = computers.find(x => x.id === id);
+  if (!c) return;
+  currentComputerId = c.id;
+  const cpuTxt = typeof c.cpu === 'number' ? c.cpu.toFixed(1) + '%' : '—';
+  const ramTxt = typeof c.ram === 'number' ? c.ram.toFixed(1) + '%' : '—';
+  document.getElementById('cd-title').textContent         = c.name;
+  document.getElementById('cd-name').textContent          = c.name;
+  document.getElementById('cd-hostname').textContent      = c.hostname || '—';
+  document.getElementById('cd-status').textContent        = (STATUS_META[c.status] || {}).label || c.status;
+  document.getElementById('cd-session').textContent       = c.session || 'Tidak tersedia';
+  document.getElementById('cd-idle').textContent          = c.idle || 'Tidak tersedia';
+  document.getElementById('cd-lastseen').textContent      = fmtTime(c.lastSeen);
+  document.getElementById('cd-cpu').textContent            = cpuTxt;
+  document.getElementById('cd-ram').textContent             = ramTxt;
+  document.getElementById('cd-ip').textContent             = c.ip || '—';
+  document.getElementById('cd-agent-version').textContent  = c.agentVersion || '—';
+  document.getElementById('cd-os').textContent             = c.os || '—';
+  document.getElementById('cd-connection').textContent     = c.connection || '—';
+  document.getElementById('modal-computer-detail').classList.add('open');
+}
+
+function closeComputerModal(e) {
+  if (e instanceof Event && e.target !== document.getElementById('modal-computer-detail')) return;
+  document.getElementById('modal-computer-detail').classList.remove('open');
+  currentComputerId = null;
+}
+
+async function sendComputerCommand(action, label) {
+  if (!currentComputerId) return;
+  const c = computers.find(x => x.id === currentComputerId);
+  const name = c ? c.name : currentComputerId;
+  if (!confirm(`Yakin ingin ${label} "${name}"?`)) return;
+  try {
+    await api('POST', '/v1/commands', { target: currentComputerId, action });
+    closeComputerModal();
+  } catch (e) {
+    alert(`Gagal ${label}: ` + e.message);
+  }
+}
+
+function restartComputer() {
+  sendComputerCommand('restart', 'restart');
+}
+
+function shutdownComputer() {
+  sendComputerCommand('shutdown', 'shutdown');
+}
+
 // ── Policy Rules Modal (Phase 2 — Module 8 Policy Engine) ────────────────────
 
 async function openPolicyRules() {
@@ -1096,6 +1315,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeSettings();
     closeAgentLogs();
+    closeComputerModal();
   }
 });
 

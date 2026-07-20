@@ -64,6 +64,9 @@
       <button class="tab-btn" data-tab="events" onclick="showTab('events')">
         Events
       </button>
+      <button class="tab-btn" data-tab="floormap" onclick="showTab('floormap')">
+        Floor Map
+      </button>
     </nav>
 
     <main>
@@ -357,7 +360,84 @@
           </div>
         </div>
       </div>
+
+      <!-- ── Floor Map ──────────────────────────────────────────────────────── -->
+      <div id="tab-floormap" class="tab-content">
+        <div class="panel floor-summary">
+          <div class="stat">
+            <span class="stat-num" id="floor-stat-total">—</span>
+            <span class="stat-label">Total PC</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num green" id="floor-stat-online">—</span>
+            <span class="stat-label">Online</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num red" id="floor-stat-offline">—</span>
+            <span class="stat-label">Offline</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num green" id="floor-stat-active">—</span>
+            <span class="stat-label">Aktif</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num blue" id="floor-stat-idle">—</span>
+            <span class="stat-label">Idle</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num gray" id="floor-stat-unused">—</span>
+            <span class="stat-label">Tidak Dipakai</span>
+          </div>
+        </div>
+
+        <div class="floor-map-wrap" style="margin-top:16px">
+          <div id="floor-map-grid" class="floor-map-grid">
+            <p class="empty">Memuat denah…</p>
+          </div>
+        </div>
+
+        <div class="floor-legend">
+          <span class="legend-item"><span class="legend-dot legend-green"></span> Aktif (Active)</span>
+          <span class="legend-item"><span class="legend-dot legend-blue"></span> Idle</span>
+          <span class="legend-item"><span class="legend-dot legend-gray"></span> Online (Tidak Dipakai)</span>
+          <span class="legend-item"><span class="legend-dot legend-red"></span> Offline</span>
+          <span class="legend-item"><span class="legend-dot legend-orange"></span> Tidak Diketahui</span>
+        </div>
+      </div>
     </main>
+
+    <!-- ── Computer Detail Modal (Floor Map) ─────────────────────────────────── -->
+    <div id="modal-computer-detail" class="modal-overlay" onclick="closeComputerModal(event)">
+      <div class="modal">
+        <div class="modal-hdr">
+          <h2 id="cd-title">Komputer</h2>
+          <button class="btn-close" onclick="closeComputerModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <table class="device-profile-table">
+            <tbody>
+              <tr><td>Nama Komputer</td><td id="cd-name">—</td></tr>
+              <tr><td>Hostname</td><td id="cd-hostname">—</td></tr>
+              <tr><td>Status Saat Ini</td><td id="cd-status">—</td></tr>
+              <tr><td>Durasi Sesi</td><td id="cd-session">—</td></tr>
+              <tr><td>Waktu Idle</td><td id="cd-idle">—</td></tr>
+              <tr><td>Terakhir Terlihat</td><td id="cd-lastseen">—</td></tr>
+              <tr><td>Penggunaan CPU</td><td id="cd-cpu">—</td></tr>
+              <tr><td>Penggunaan RAM</td><td id="cd-ram">—</td></tr>
+              <tr><td>Alamat IP</td><td id="cd-ip">—</td></tr>
+              <tr><td>Versi Agent</td><td id="cd-agent-version">—</td></tr>
+              <tr><td>Sistem Operasi</td><td id="cd-os">—</td></tr>
+              <tr><td>Tipe Koneksi</td><td id="cd-connection">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-ftr">
+          <button class="btn-outline" onclick="restartComputer()">🔁 Restart</button>
+          <button class="btn-outline" onclick="shutdownComputer()">⏻ Shutdown</button>
+          <button class="btn-ghost" onclick="closeComputerModal()">Tutup</button>
+        </div>
+      </div>
+    </div>
 
     <!-- ── Policy Rules Modal (Phase 2 — Module 8) ───────────────────────────── -->
     <div id="modal-policy-rules" class="modal-overlay" onclick="closePolicyRules(event)">
