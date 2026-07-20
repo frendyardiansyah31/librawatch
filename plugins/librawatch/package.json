@@ -1,0 +1,39 @@
+{
+  "name": "openclaw-plugin-librawatch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw plugin adapting the LibraWatch REST API (defined by docs/openapi.yaml) into OpenClaw tools. Adapter only — no business logic.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "dist/plugin.js",
+  "types": "dist/plugin.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "openclaw.plugin.json"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p . && openclaw plugins build --entry ./dist/openclaw-entry.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/openclaw-entry.js"
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "id": "librawatch",
+  "name": "LibraWatch",
+  "description": "LibraWatch REST API adapter — monitor and manage library lab PC agents, alerts, deploy jobs, and policy rules via the LibraWatch Go server.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "librawatch_login",
+      "librawatch_logout",
+      "librawatch_list_agents",
+      "librawatch_get_agent",
+      "librawatch_update_agent",
+      "librawatch_delete_agent",
+      "librawatch_get_agent_metrics",
+      "librawatch_get_agent_processes",
+      "librawatch_kill_process",
+      "librawatch_set_agent_network_mode",
+      "librawatch_get_agent_logs",
+      "librawatch_get_agent_events",
+      "librawatch_list_alerts",
+      "librawatch_list_applications",
+      "librawatch_get_application",
+      "librawatch_update_application",
+      "librawatch_list_categories",
+      "librawatch_list_events",
+      "librawatch_list_policy_rules",
+      "librawatch_create_policy_rule",
+      "librawatch_update_policy_rule",
+      "librawatch_delete_policy_rule",
+      "librawatch_get_settings",
+      "librawatch_update_settings",
+      "librawatch_list_audit_logs",
+      "librawatch_get_health",
+      "librawatch_get_stats",
+      "librawatch_list_deploy_jobs",
+      "librawatch_create_deploy_job",
+      "librawatch_get_deploy_job",
+      "librawatch_cancel_deploy_job",
+      "librawatch_test_telegram",
+      "librawatch_test_email",
+      "librawatch_tail_server_logs",
+      "librawatch_list_clients_v1",
+      "librawatch_upload_file",
+      "librawatch_download_file"
+    ]
+  }
+}
