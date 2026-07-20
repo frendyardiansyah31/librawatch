@@ -78,6 +78,7 @@ func (p *agentProgram) Start(_ service.Service) error {
 // there's no need to gate watcher startup on a live connection.
 func startEventWatchers(ctx context.Context, agentID string) {
 	go startUSBWatch(ctx, agentID)
+	go startPeripheralWatch(ctx, agentID)
 	go startDownloadWatch(ctx, agentID)
 	go startDesktopWatch(ctx, agentID)
 	go startConfigWatch(ctx, agentID)

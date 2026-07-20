@@ -45,6 +45,11 @@ Base URL: `http://<server-ip>:<port>` (default port lihat `config.yaml`).
 |---|---|---|
 | GET | `/api/alerts` | List alert terakhir (query `limit`, default 100, max 1000) |
 
+Alert types: `cpu_high`, `ram_high` (threshold + 3x consecutive check), `blacklisted_app`
+(cooldown 60 menit per app per agent), `offline`, `recovery`, dan `peripheral_removed`
+(Peripheral Tamper Detection — keyboard/mouse terlepas, dipicu dari event
+`peripheral_removed`, lihat bagian Events).
+
 ### Settings
 | Method | Path | Fungsi |
 |---|---|---|
@@ -79,7 +84,11 @@ Event types: `usb_inserted`, `usb_removed` (Module 1), `download_created`, `down
 RunOnce registry + Scheduled Tasks), `software_installed`, `software_removed`,
 `software_updated` (Module 5 — otomatis masuk ke Application Catalog Phase 1 yang sama via
 `UpsertApplicationByProduct`, tidak bikin record duplikat), `exec_policy` (Module 6 — proses
-yang jalan dari lokasi terpantau: Downloads/Desktop/Temp/USB).
+yang jalan dari lokasi terpantau: Downloads/Desktop/Temp/USB), `peripheral_connected`,
+`peripheral_removed` (Peripheral Tamper Detection — agent memantau keyboard/mouse via
+`Win32_Keyboard`/`Win32_PointingDevice` setiap 5 detik dan membandingkan dengan snapshot
+sebelumnya; device dianggap lepas setelah absen 2 polling berturut-turut. `peripheral_removed`
+juga otomatis memicu alert asli — lihat bagian Alerts).
 
 Setiap event dievaluasi lewat Policy Engine (`server/policy.go`) terhadap tabel
 `policy_rules` sebelum disimpan — field `action` pada tiap event (`log`/`notify`/`blocked`/

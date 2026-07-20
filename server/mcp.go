@@ -87,14 +87,14 @@ func NewMCPHandler(hub *Hub, db *DB, deployer *Deployer, deepFreezePassword stri
 		Name:        "restart_pc",
 		Description: "Restart a specific PC by hostname.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in PCActionInput) (*mcp.CallToolResult, PCActionOutput, error) {
-		return pcActionResult(dispatchPCJob(db, deployer, in.Hostname, "exec", "Restart-Computer -Force", "", "restart_pc"))
+		return pcActionResult(dispatchPCJob(db, deployer, in.Hostname, "exec", psRestart, "", "restart_pc"))
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "shutdown_pc",
 		Description: "Shut down a specific PC by hostname.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in PCActionInput) (*mcp.CallToolResult, PCActionOutput, error) {
-		return pcActionResult(dispatchPCJob(db, deployer, in.Hostname, "exec", "Stop-Computer -Force", "", "shutdown_pc"))
+		return pcActionResult(dispatchPCJob(db, deployer, in.Hostname, "exec", psShutdown, "", "shutdown_pc"))
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{

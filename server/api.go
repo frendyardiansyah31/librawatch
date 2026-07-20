@@ -388,6 +388,10 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			c.JSON(http.StatusBadRequest, gin.H{"error": "action must be one of log, notify, block, delete, kill"})
 			return
 		}
+		if rule.AppStatus != "" && !validAppStatuses[rule.AppStatus] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "app_status must be empty or one of pending_review, allowed, blocked, ignored"})
+			return
+		}
 		id, err := db.InsertPolicyRule(&rule)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -415,6 +419,10 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 		}
 		if !validPolicyActions[rule.Action] {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "action must be one of log, notify, block, delete, kill"})
+			return
+		}
+		if rule.AppStatus != "" && !validAppStatuses[rule.AppStatus] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "app_status must be empty or one of pending_review, allowed, blocked, ignored"})
 			return
 		}
 		if err := db.UpdatePolicyRule(id, &rule); err != nil {

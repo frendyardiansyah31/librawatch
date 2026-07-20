@@ -18,6 +18,7 @@ type PolicyContext struct {
 	DeviceGroup       string
 	EventType         string // '' when evaluating a running process, not an event
 	CategoryID        *int64
+	AppStatus         string // applications.status ('' when unset or not applicable, e.g. plain events)
 	FileExtension     string
 	ExecutionLocation string // downloads|desktop|temp|usb|'' (unknown/other)
 }
@@ -86,6 +87,12 @@ func matchScore(r *PolicyRule, ctx PolicyContext) (int, bool) {
 	}
 	if r.CategoryID != nil {
 		if ctx.CategoryID == nil || *r.CategoryID != *ctx.CategoryID {
+			return 0, false
+		}
+		score++
+	}
+	if r.AppStatus != "" {
+		if r.AppStatus != ctx.AppStatus {
 			return 0, false
 		}
 		score++
@@ -168,11 +175,13 @@ func (p *PolicyEngine) EvaluateProcesses(agentID, hostname string, procs []Proce
 
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(proc.Path)), ".")
 		categoryID := p.lookupCategoryByExeName(proc.Name)
+		appStatus := p.lookupAppStatusByExeName(proc.Name)
 
 		decision := p.Evaluate(PolicyContext{
 			AgentID:           agentID,
 			DeviceGroup:       deviceGroup,
 			CategoryID:        categoryID,
+			AppStatus:         appStatus,
 			FileExtension:     ext,
 			ExecutionLocation: loc,
 		})
@@ -201,6 +210,25 @@ func (p *PolicyEngine) lookupCategoryByExeName(exeName string) *int64 {
 		return nil
 	}
 	return &cid.Int64
+}
+
+// lookupAppStatusByExeName returns the applications.status for exeName, used
+// to let a PolicyRule target "any process belonging to an app marked
+// Blocked" directly, without going through a category first. Filters out
+// the default 'pending_review' the same way lookupCategoryByExeName filters
+// out NULL category_id — if exe_name collides across multiple applications
+// rows (different company, same generic name like "setup.exe"), prefer a
+// row that's been explicitly classified over one still sitting at default.
+func (p *PolicyEngine) lookupAppStatusByExeName(exeName string) string {
+	var status string
+	err := p.db.QueryRow(
+		`SELECT status FROM applications WHERE exe_name = ? AND status != 'pending_review' LIMIT 1`,
+		exeName,
+	).Scan(&status)
+	if err != nil {
+		return ""
+	}
+	return status
 }
 
 func (p *PolicyEngine) actOnExecution(agentID, hostname string, proc Process, loc string, decision PolicyDecision) {

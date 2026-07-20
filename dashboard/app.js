@@ -78,6 +78,10 @@ async function api(method, path, body) {
   const r = await fetch('/api' + path, opts);
   if (r.status === 401) {
     clearToken();
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+    Object.values(deployPollers).forEach(clearInterval);
+    deployPollers = {};
     showLogin();
     throw new Error('Session berakhir, silakan login kembali');
   }
@@ -125,7 +129,8 @@ function barHtml(pct) {
 
 function alertLabel(type) {
   return { cpu_high:'CPU Tinggi', ram_high:'RAM Tinggi', offline:'Offline',
-           recovery:'Online Kembali', blacklisted_app:'Aplikasi Terlarang' }[type] || type;
+           recovery:'Online Kembali', blacklisted_app:'Aplikasi Terlarang',
+           peripheral_removed:'Perangkat Terlepas' }[type] || type;
 }
 
 function agentName(id) {
@@ -921,6 +926,7 @@ const EVENT_TYPE_LABEL = {
   config_changed: 'Konfigurasi Berubah', software_installed: 'Software Terinstall',
   software_removed: 'Software Dihapus', software_updated: 'Software Diperbarui',
   exec_policy: 'Kebijakan Eksekusi',
+  peripheral_connected: 'Perangkat Terpasang', peripheral_removed: 'Perangkat Terlepas',
 };
 function eventTypeLabel(type) { return EVENT_TYPE_LABEL[type] || type; }
 
@@ -974,6 +980,8 @@ async function openPolicyRules() {
   const catSelect = document.getElementById('pr-category');
   catSelect.innerHTML = '<option value="">— Semua kategori —</option>' +
     allCategories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  document.getElementById('pr-app-status').innerHTML =
+    '<option value="">— Semua status —</option>' + statusOptionsHtml('');
   loadPolicyRules();
 }
 
@@ -988,14 +996,14 @@ async function loadPolicyRules() {
     const rules = await api('GET', '/policy-rules');
     renderPolicyRules(rules || []);
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty" style="color:#dc2626">${esc(e.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="empty" style="color:#dc2626">${esc(e.message)}</td></tr>`;
   }
 }
 
 function renderPolicyRules(rules) {
   const tbody = document.getElementById('policy-rules-tbody');
   if (!rules.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">Belum ada policy rule</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">Belum ada policy rule</td></tr>';
     return;
   }
   const catName = id => (allCategories.find(c => c.id === id) || {}).name || '—';
@@ -1004,6 +1012,7 @@ function renderPolicyRules(rules) {
       <td>${esc(r.name)}</td>
       <td>${esc(r.event_type || '—')}</td>
       <td>${r.category_id ? esc(catName(r.category_id)) : '—'}</td>
+      <td>${r.app_status ? esc(APP_STATUS_LABEL[r.app_status] || r.app_status) : '—'}</td>
       <td>${esc(r.file_extension || '—')}</td>
       <td>${esc(r.execution_location || '—')}</td>
       <td>${esc(r.device_group || '—')}</td>
@@ -1024,6 +1033,7 @@ async function createPolicyRule() {
     name,
     event_type: document.getElementById('pr-event-type').value.trim(),
     category_id: categoryVal ? Number(categoryVal) : null,
+    app_status: document.getElementById('pr-app-status').value,
     file_extension: document.getElementById('pr-extension').value.trim(),
     execution_location: document.getElementById('pr-location').value.trim(),
     device_group: document.getElementById('pr-device-group').value.trim(),

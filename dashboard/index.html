@@ -375,11 +375,35 @@
             </div>
             <div class="form-row">
               <label>Event Type (kosong = semua)</label>
-              <input id="pr-event-type" type="text" placeholder="usb_inserted, download_created, ..." />
+              <input id="pr-event-type" type="text" placeholder="usb_inserted, download_created, ..." list="pr-event-type-options" />
+              <datalist id="pr-event-type-options">
+                <option value="usb_inserted">
+                <option value="usb_removed">
+                <option value="download_created">
+                <option value="download_deleted">
+                <option value="wallpaper_changed">
+                <option value="theme_changed">
+                <option value="config_changed">
+                <option value="software_installed">
+                <option value="software_removed">
+                <option value="software_updated">
+                <option value="peripheral_connected">
+                <option value="peripheral_removed">
+                <option value="exec_policy">
+              </datalist>
+              <small style="color:var(--muted);font-size:11px">
+                Pilihan: usb_inserted, usb_removed, download_created, download_deleted, wallpaper_changed,
+                theme_changed, config_changed, software_installed, software_removed, software_updated,
+                peripheral_connected, peripheral_removed, exec_policy
+              </small>
             </div>
             <div class="form-row">
               <label>Kategori (kosong = semua)</label>
               <select id="pr-category"><option value="">— Semua kategori —</option></select>
+            </div>
+            <div class="form-row">
+              <label>Status Aplikasi (kosong = semua)</label>
+              <select id="pr-app-status"><option value="">— Semua status —</option></select>
             </div>
             <div class="form-row">
               <label>Ekstensi File (kosong = semua)</label>
@@ -411,12 +435,12 @@
               <table>
                 <thead>
                   <tr>
-                    <th>Nama</th><th>Event</th><th>Kategori</th><th>Ekstensi</th>
+                    <th>Nama</th><th>Event</th><th>Kategori</th><th>Status Aplikasi</th><th>Ekstensi</th>
                     <th>Lokasi</th><th>Group</th><th>Aksi</th><th>Aktif</th><th></th>
                   </tr>
                 </thead>
                 <tbody id="policy-rules-tbody">
-                  <tr><td colspan="9" class="empty">Memuat…</td></tr>
+                  <tr><td colspan="10" class="empty">Memuat…</td></tr>
                 </tbody>
               </table>
             </div>

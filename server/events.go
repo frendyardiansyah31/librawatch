@@ -57,6 +57,12 @@ func (e *EventRecorder) Record(agentID, hostname, eventType string, metadata map
 		e.integrateCatalog(agentID, metadata)
 	}
 
+	if eventType == "peripheral_removed" && e.hub.alerter != nil {
+		deviceName, _ := metadata["device_name"].(string)
+		deviceClass, _ := metadata["device_class"].(string)
+		e.hub.alerter.FireTamperAlert(agentID, hostname, deviceName, deviceClass)
+	}
+
 	slog.Info("event recorded", "agent_id", agentID, "type", eventType, "action", finalAction)
 }
 
@@ -95,15 +101,17 @@ func (e *EventRecorder) act(agentID, hostname, eventType string, metadata map[st
 
 func formatEventMessage(hostname, eventType string, metadata map[string]interface{}) string {
 	label := map[string]string{
-		"usb_inserted":       "🔌 USB terpasang",
-		"usb_removed":        "🔌 USB dilepas",
-		"download_created":   "⬇️ File baru di folder terpantau",
-		"wallpaper_changed":  "🖼️ Wallpaper diubah",
-		"theme_changed":      "🎨 Tema diubah",
-		"config_changed":     "⚙️ Konfigurasi Windows berubah",
-		"software_installed": "📦 Software terinstall",
-		"software_removed":   "📦 Software dihapus",
-		"software_updated":   "📦 Software diperbarui",
+		"usb_inserted":         "🔌 USB terpasang",
+		"usb_removed":          "🔌 USB dilepas",
+		"peripheral_connected": "🖱️ Perangkat terpasang",
+		"peripheral_removed":   "🖱️ Perangkat terlepas",
+		"download_created":     "⬇️ File baru di folder terpantau",
+		"wallpaper_changed":    "🖼️ Wallpaper diubah",
+		"theme_changed":        "🎨 Tema diubah",
+		"config_changed":       "⚙️ Konfigurasi Windows berubah",
+		"software_installed":   "📦 Software terinstall",
+		"software_removed":     "📦 Software dihapus",
+		"software_updated":     "📦 Software diperbarui",
 	}[eventType]
 	if label == "" {
 		label = eventType

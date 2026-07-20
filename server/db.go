@@ -218,6 +218,7 @@ type PolicyRule struct {
 	Name              string    `json:"name"`
 	EventType         string    `json:"event_type"`
 	CategoryID        *int64    `json:"category_id"`
+	AppStatus         string    `json:"app_status"`
 	FileExtension     string    `json:"file_extension"`
 	ExecutionLocation string    `json:"execution_location"`
 	DeviceGroup       string    `json:"device_group"`
@@ -395,6 +396,20 @@ func (db *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_deploy_results_job
 		ON deploy_results(job_id, agent_id);
 
+	-- command_requests is a thin sidecar over deploy_jobs: it records the
+	-- Command API-specific fields (action, original target string,
+	-- correlation_id) that deploy_jobs itself has no columns for, without
+	-- touching DeployJob/Deployer.CreateJob (shared with POST /api/deploy
+	-- and the MCP tools). A deploy_jobs row with no matching command_requests
+	-- row simply wasn't created through the Command API.
+	CREATE TABLE IF NOT EXISTS command_requests (
+		job_id         TEXT PRIMARY KEY REFERENCES deploy_jobs(id),
+		action         TEXT NOT NULL,
+		target         TEXT NOT NULL,
+		correlation_id TEXT NOT NULL DEFAULT '',
+		created_at     TEXT NOT NULL
+	);
+
 	CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
@@ -518,6 +533,14 @@ func (db *DB) migrate() error {
 	} {
 		if err := db.addColumnIfMissing("deploy_results", col.name, col.decl); err != nil {
 			return fmt.Errorf("add column deploy_results.%s: %w", col.name, err)
+		}
+	}
+
+	for _, col := range []struct{ name, decl string }{
+		{"app_status", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := db.addColumnIfMissing("policy_rules", col.name, col.decl); err != nil {
+			return fmt.Errorf("add column policy_rules.%s: %w", col.name, err)
 		}
 	}
 
@@ -737,6 +760,18 @@ func (db *DB) GetAgentDesiredNetworkMode(id string) (string, error) {
 		return "both", nil
 	}
 	return mode, err
+}
+
+// GetAgentMacAddress is a lightweight lookup (mirrors GetAgentDeviceGroup)
+// used by the wake Command API action to find the target for a
+// Wake-on-LAN magic packet.
+func (db *DB) GetAgentMacAddress(id string) (string, error) {
+	var mac string
+	err := db.QueryRow(`SELECT mac_address FROM agents WHERE id = ?`, id).Scan(&mac)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return mac, err
 }
 
 // UpdateAgentNetworkModeResult records the agent's self-reported outcome of
@@ -1104,6 +1139,94 @@ func (db *DB) UpdateDeployResult(jobID, agentID, status, output string, exitCode
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// CommandRequestMeta is the command_requests sidecar row for one DeployJob —
+// the Command API-specific fields (action, original target string,
+// correlation_id) that deploy_jobs has no columns for.
+type CommandRequestMeta struct {
+	JobID         string
+	Action        string
+	Target        string
+	CorrelationID string
+	CreatedAt     time.Time
+}
+
+// InsertCommandRequest records that jobID was created through the Command
+// API (POST /api/v1/commands), alongside the action/target/correlation_id
+// that deploy_jobs itself doesn't store. Called once, right after the
+// underlying DeployJob row exists.
+func (db *DB) InsertCommandRequest(jobID, action, target, correlationID string) error {
+	_, err := db.Exec(`
+		INSERT INTO command_requests (job_id, action, target, correlation_id, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, jobID, action, target, correlationID, fmtTime(nowWIB()))
+	return err
+}
+
+// GetCommandRequestByJobID returns nil (no error) if jobID exists but wasn't
+// created through the Command API (e.g. POST /api/deploy or an MCP tool) —
+// callers use that to distinguish "not a command" from "not found".
+func (db *DB) GetCommandRequestByJobID(jobID string) (*CommandRequestMeta, error) {
+	var m CommandRequestMeta
+	var createdAt string
+	err := db.QueryRow(`
+		SELECT job_id, action, target, correlation_id, created_at
+		FROM command_requests WHERE job_id = ?
+	`, jobID).Scan(&m.JobID, &m.Action, &m.Target, &m.CorrelationID, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.CreatedAt = parseDBTime(createdAt)
+	return &m, nil
+}
+
+// CommandSummaryRow is the joined command_requests + deploy_jobs projection
+// used by GET /api/v1/commands (list).
+type CommandSummaryRow struct {
+	JobID     string
+	Action    string
+	Target    string
+	Status    string
+	CreatedAt time.Time
+}
+
+// GetRecentCommandsWithStatus lists the 100 most recent Command API jobs,
+// newest first — same LIMIT convention as GetAllDeployJobs.
+func (db *DB) GetRecentCommandsWithStatus() ([]CommandSummaryRow, error) {
+	rows, err := db.Query(`
+		SELECT cr.job_id, cr.action, cr.target, dj.status, dj.created_at
+		FROM command_requests cr
+		JOIN deploy_jobs dj ON dj.id = cr.job_id
+		ORDER BY dj.created_at DESC LIMIT 100
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]CommandSummaryRow, 0)
+	for rows.Next() {
+		var r CommandSummaryRow
+		var createdAt string
+		if err := rows.Scan(&r.JobID, &r.Action, &r.Target, &r.Status, &createdAt); err != nil {
+			return nil, err
+		}
+		r.CreatedAt = parseDBTime(createdAt)
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// CountPendingResultsForAgent reports how many deploy_results rows for
+// agentID are still queued (pending) — used to compute
+// CommandResponse.estimated_queue_position before a new job is created.
+func (db *DB) CountPendingResultsForAgent(agentID string) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM deploy_results WHERE agent_id = ? AND status = 'pending'`, agentID).Scan(&n)
+	return n, err
 }
 
 // UpdateJobStatus marks a job "done" once none of its per-agent results are
@@ -1679,7 +1802,7 @@ func (db *DB) GetEvents(agentID, eventType string, limit int) ([]Event, error) {
 
 func (db *DB) GetAllPolicyRules() ([]PolicyRule, error) {
 	rows, err := db.Query(`
-		SELECT id, name, event_type, category_id, file_extension, execution_location, device_group, action, enabled, created_at
+		SELECT id, name, event_type, category_id, app_status, file_extension, execution_location, device_group, action, enabled, created_at
 		FROM policy_rules ORDER BY id ASC
 	`)
 	if err != nil {
@@ -1693,7 +1816,7 @@ func (db *DB) GetAllPolicyRules() ([]PolicyRule, error) {
 		var categoryID sql.NullInt64
 		var enabled int
 		var createdAt string
-		if err := rows.Scan(&r.ID, &r.Name, &r.EventType, &categoryID, &r.FileExtension,
+		if err := rows.Scan(&r.ID, &r.Name, &r.EventType, &categoryID, &r.AppStatus, &r.FileExtension,
 			&r.ExecutionLocation, &r.DeviceGroup, &r.Action, &enabled, &createdAt); err != nil {
 			return nil, err
 		}
@@ -1727,9 +1850,9 @@ func (db *DB) GetEnabledPolicyRules() ([]PolicyRule, error) {
 
 func (db *DB) InsertPolicyRule(r *PolicyRule) (int64, error) {
 	res, err := db.Exec(`
-		INSERT INTO policy_rules (name, event_type, category_id, file_extension, execution_location, device_group, action, enabled, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, r.Name, r.EventType, r.CategoryID, r.FileExtension, r.ExecutionLocation, r.DeviceGroup, r.Action, boolToInt(r.Enabled), fmtTime(nowWIB()))
+		INSERT INTO policy_rules (name, event_type, category_id, app_status, file_extension, execution_location, device_group, action, enabled, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.Name, r.EventType, r.CategoryID, r.AppStatus, r.FileExtension, r.ExecutionLocation, r.DeviceGroup, r.Action, boolToInt(r.Enabled), fmtTime(nowWIB()))
 	if err != nil {
 		return 0, err
 	}
@@ -1739,10 +1862,10 @@ func (db *DB) InsertPolicyRule(r *PolicyRule) (int64, error) {
 func (db *DB) UpdatePolicyRule(id int64, r *PolicyRule) error {
 	_, err := db.Exec(`
 		UPDATE policy_rules SET
-			name = ?, event_type = ?, category_id = ?, file_extension = ?,
+			name = ?, event_type = ?, category_id = ?, app_status = ?, file_extension = ?,
 			execution_location = ?, device_group = ?, action = ?, enabled = ?
 		WHERE id = ?
-	`, r.Name, r.EventType, r.CategoryID, r.FileExtension, r.ExecutionLocation, r.DeviceGroup, r.Action, boolToInt(r.Enabled), id)
+	`, r.Name, r.EventType, r.CategoryID, r.AppStatus, r.FileExtension, r.ExecutionLocation, r.DeviceGroup, r.Action, boolToInt(r.Enabled), id)
 	return err
 }
 

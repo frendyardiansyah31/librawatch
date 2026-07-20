@@ -100,7 +100,7 @@ nav {
 /* ── Main ─────────────────────────────────────────────────────────────────── */
 main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
 
-.tab-content { display: none; }
+.tab-content { display: none; min-width: 1600px; }
 .tab-content.active { display: block; }
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
@@ -182,11 +182,11 @@ main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r);
-  overflow: hidden;
+  overflow-x: auto;
   box-shadow: var(--sh);
 }
 
-table { width: 100%; border-collapse: collapse; }
+table { width: 100%; min-width: max-content; border-collapse: collapse; }
 
 thead th {
   background: #f8fafc;
@@ -242,7 +242,7 @@ tbody td { padding: 10px 12px; vertical-align: middle; }
 .detail-grid {
   display: grid;
   grid-template-columns: 340px 1fr;
-  gap: 20px;
+  gap: 80px;
   align-items: start;
 }
 
@@ -270,7 +270,8 @@ tbody td { padding: 10px 12px; vertical-align: middle; }
 
 .device-profile-table { width: 100%; font-size: 12px; border-collapse: collapse; }
 .device-profile-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
-.device-profile-table td:first-child { color: var(--muted); font-weight: 600; width: 55%; }
+.device-profile-table td:first-child { color: var(--muted); font-weight: 600; width: 30%; }
+.device-profile-table td:last-child { max-width: 1px; white-space: normal; word-break: break-word; }
 .device-profile-table tr:last-child td { border-bottom: none; }
 .proc-table td:last-child { width: 28px; padding: 2px 4px; }
 
@@ -467,6 +468,7 @@ select.badge {
 .alert-badge.offline                         { background: #fee2e2; color: #991b1b; }
 .alert-badge.recovery                        { background: #dcfce7; color: #166534; }
 .alert-badge.blacklisted_app                 { background: #ede9fe; color: #5b21b6; }
+.alert-badge.peripheral_removed              { background: #fee2e2; color: #991b1b; }
 
 .alert-msg  { flex: 1; font-size: 13px; line-height: 1.5; }
 .alert-time { font-size: 11px; color: var(--muted); white-space: nowrap; }

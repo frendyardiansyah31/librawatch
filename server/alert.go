@@ -136,6 +136,28 @@ func (a *Alerter) CheckRecovery(agentID, hostname string) {
 	a.fire(agentID, "recovery", msg, settings)
 }
 
+// FireTamperAlert fires a peripheral-tamper alert (mouse/keyboard unplugged)
+// through the same fire() pipeline CPU/RAM/offline/recovery alerts already
+// use — alerts table insert, Telegram, email — instead of a second
+// notification path.
+func (a *Alerter) FireTamperAlert(agentID, hostname, deviceName, deviceClass string) {
+	settings, err := a.db.GetAllSettings()
+	if err != nil {
+		slog.Error("alert: get settings for tamper alert", "error", err)
+		return
+	}
+	label := "Perangkat"
+	switch deviceClass {
+	case "keyboard":
+		label = "Keyboard"
+	case "pointing_device":
+		label = "Mouse"
+	}
+	msg := fmt.Sprintf("🚨 %s terlepas di %s: %s — %s",
+		label, hostname, deviceName, nowWIB().Format("15:04 WIB"))
+	a.fire(agentID, "peripheral_removed", msg, settings)
+}
+
 // StartOfflineChecker runs indefinitely, checking every 2 minutes for agents
 // that haven't been seen for longer than offline_after_minutes.
 func (a *Alerter) StartOfflineChecker() {
