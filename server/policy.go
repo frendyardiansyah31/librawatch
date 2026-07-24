@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // PolicyContext is what an incoming event or a running process is evaluated
@@ -35,10 +37,47 @@ type PolicyDecision struct {
 type PolicyEngine struct {
 	db  *DB
 	hub *Hub
+
+	relevantAppsMu    sync.RWMutex
+	relevantAppsCache map[string]PolicyRelevantApp
+	relevantAppsAt    time.Time
 }
 
 func NewPolicyEngine(db *DB, hub *Hub) *PolicyEngine {
 	return &PolicyEngine{db: db, hub: hub}
+}
+
+// relevantAppsCacheTTL bounds how stale the app_status/category_id lookup
+// can be. EvaluateProcesses is now called both from the 30s metrics tick and
+// from the WMI process-start fast path (one call per process launch,
+// machine-wide, across every connected agent) — without this cache, every
+// process start would trigger a SQLite query. A few seconds of staleness on
+// an application's blocked/allowed status is an acceptable tradeoff for
+// keeping the hot path in-memory only.
+const relevantAppsCacheTTL = 5 * time.Second
+
+// relevantApps returns the same data as db.GetPolicyRelevantApps, served
+// from a short-TTL in-memory cache shared by every EvaluateProcesses caller.
+func (p *PolicyEngine) relevantApps() (map[string]PolicyRelevantApp, error) {
+	p.relevantAppsMu.RLock()
+	if p.relevantAppsCache != nil && time.Since(p.relevantAppsAt) < relevantAppsCacheTTL {
+		cached := p.relevantAppsCache
+		p.relevantAppsMu.RUnlock()
+		return cached, nil
+	}
+	p.relevantAppsMu.RUnlock()
+
+	fresh, err := p.db.GetPolicyRelevantApps()
+	if err != nil {
+		return nil, err
+	}
+
+	p.relevantAppsMu.Lock()
+	p.relevantAppsCache = fresh
+	p.relevantAppsAt = time.Now()
+	p.relevantAppsMu.Unlock()
+
+	return fresh, nil
 }
 
 // Evaluate matches ctx against every enabled policy_rules row. A rule
@@ -182,7 +221,7 @@ func describeExecutionLocation(loc string) string {
 // set once per call, so an ordinary unflagged process outside a watched
 // location is skipped via two map lookups, no DB round trip.
 func (p *PolicyEngine) EvaluateProcesses(agentID, hostname string, procs []Process) {
-	relevantApps, err := p.db.GetPolicyRelevantApps()
+	relevantApps, err := p.relevantApps()
 	if err != nil {
 		slog.Error("policy: load policy-relevant apps failed", "error", err)
 		relevantApps = nil // fall back to location-only matching, don't abort the tick
@@ -223,17 +262,24 @@ func (p *PolicyEngine) EvaluateProcesses(agentID, hostname string, procs []Proce
 		// (handleMetrics → EvaluateProcesses) — blocking here would prevent
 		// that very reply from ever being read, deadlocking until the 10s
 		// timeout. Same reason Alerter.autoKill already fires via `go`.
-		go p.actOnExecution(agentID, hostname, proc, loc, decision)
+		go p.actOnExecution(agentID, hostname, proc, loc, app.Company, decision)
 	}
 }
 
-func (p *PolicyEngine) actOnExecution(agentID, hostname string, proc Process, loc string, decision PolicyDecision) {
+// actOnExecution carries out decision for one matched process. company is
+// the applications.company of the matched exe_name (empty if there's no
+// applications row / no company recorded) — passed through to a kill
+// decision so the agent verifies the running process's own file metadata
+// against it before terminating (see hub.KillProcessByIdentity), rather than
+// killing anything that merely shares the exe_name the way a bare
+// "taskkill /IM" would.
+func (p *PolicyEngine) actOnExecution(agentID, hostname string, proc Process, loc, company string, decision PolicyDecision) {
 	finalAction := decision.Action
 	message := fmt.Sprintf("Kebijakan eksekusi: %s dijalankan dari %s di %s", proc.Name, describeExecutionLocation(loc), hostname)
 
 	switch decision.Action {
 	case PolicyActionKill:
-		output, err := p.hub.KillProcess(agentID, proc.PID, proc.Name)
+		output, err := p.hub.KillProcessByIdentity(agentID, proc.Name, company)
 		if err != nil {
 			slog.Warn("policy: kill failed", "agent_id", agentID, "process", proc.Name, "error", err)
 			finalAction = EventActionLog

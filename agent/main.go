@@ -83,6 +83,7 @@ func startEventWatchers(ctx context.Context, agentID string) {
 	go startDesktopWatch(ctx, agentID)
 	go startConfigWatch(ctx, agentID)
 	go startInstallWatch(ctx, agentID)
+	go startProcessStartWatch(ctx, agentID)
 }
 
 func (p *agentProgram) Stop(_ service.Service) error {
@@ -440,6 +441,8 @@ func handleServerMessage(agentID string, data []byte) {
 		go deployFile(agentID, msg)
 	case "kill_process":
 		go handleKillProcess(agentID, msg)
+	case "kill_by_identity":
+		go handleKillByIdentity(agentID, msg)
 	case "get_logs":
 		go sendLogLines(agentID, msg)
 	case "deepfreeze":

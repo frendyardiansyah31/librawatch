@@ -1854,19 +1854,28 @@ func (db *DB) GetEnabledPolicyRules() ([]PolicyRule, error) {
 type PolicyRelevantApp struct {
 	Status     string
 	CategoryID *int64
+	// Company is applications.company for the matched row — carried through
+	// so a kill decision can tell the agent exactly which vendor's exe_name
+	// to terminate (KillProcessByIdentity/"kill_by_identity"), instead of
+	// killing any process that merely shares the exe_name. Empty is a valid,
+	// exact value: an app with no recorded company only matches processes
+	// whose own file metadata also reports no CompanyName, not to a random
+	// unrelated app.
+	Company string
 }
 
-// GetPolicyRelevantApps returns, per exe_name, the status/category_id the
-// Policy Engine needs to match app_status/category rules against — one
-// query per metrics tick instead of a per-process query. Only
-// policy-relevant rows are included (status != 'pending_review' OR
-// category_id IS NOT NULL); an exe_name absent from the map has neither.
-// exe_name can collide across companies (unique index is on
-// (exe_name, company)) — a collision keeps whichever row SQLite returns
-// first, the same unordered-LIMIT-1 tie-break this replaces used per field.
+// GetPolicyRelevantApps returns, per exe_name, the status/category_id/company
+// the Policy Engine needs to match app_status/category rules against and to
+// identify the intended process precisely when killing — one query per
+// metrics tick instead of a per-process query. Only policy-relevant rows are
+// included (status != 'pending_review' OR category_id IS NOT NULL); an
+// exe_name absent from the map has neither. exe_name can collide across
+// companies (unique index is on (exe_name, company)) — a collision keeps
+// whichever row SQLite returns first, the same unordered-LIMIT-1 tie-break
+// this replaces used per field.
 func (db *DB) GetPolicyRelevantApps() (map[string]PolicyRelevantApp, error) {
 	rows, err := db.Query(`
-		SELECT exe_name, status, category_id
+		SELECT exe_name, status, category_id, company
 		FROM applications
 		WHERE exe_name <> '' AND (status != 'pending_review' OR category_id IS NOT NULL)
 	`)
@@ -1877,15 +1886,15 @@ func (db *DB) GetPolicyRelevantApps() (map[string]PolicyRelevantApp, error) {
 
 	result := make(map[string]PolicyRelevantApp)
 	for rows.Next() {
-		var exeName, status string
+		var exeName, status, company string
 		var categoryID sql.NullInt64
-		if err := rows.Scan(&exeName, &status, &categoryID); err != nil {
+		if err := rows.Scan(&exeName, &status, &categoryID, &company); err != nil {
 			return nil, err
 		}
 		if _, seen := result[exeName]; seen {
 			continue
 		}
-		app := PolicyRelevantApp{}
+		app := PolicyRelevantApp{Company: company}
 		if status != "pending_review" {
 			app.Status = status
 		}

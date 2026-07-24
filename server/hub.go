@@ -65,8 +65,9 @@ type OutgoingMessage struct {
 	Action   string `json:"action,omitempty"`    // deepfreeze: thaw/freeze/query_df
 	Password string `json:"password,omitempty"`  // deepfreeze: optional DF password
 	PID      int    `json:"pid,omitempty"`       // kill_process: target PID
-	ProcName string `json:"proc_name,omitempty"` // kill_process: fallback by name
+	ProcName string `json:"proc_name,omitempty"` // kill_process: fallback by name; kill_by_identity: exe_name to match
 	Path     string `json:"path,omitempty"`      // delete_file: absolute path to remove
+	Company  string `json:"company,omitempty"`   // kill_by_identity: expected CompanyName, verified against each matching process's file before it's killed
 
 	NetworkMode string `json:"network_mode,omitempty"` // network_mode: desired ethernet/wifi/both
 }
@@ -253,6 +254,8 @@ func (h *Hub) handleMessage(c *Client, data []byte) {
 		h.handleKillResult(c, &msg)
 	case "event":
 		h.handleEvent(c, &msg)
+	case "proc_start":
+		h.handleProcessStart(c, &msg)
 	case "delete_file_result":
 		slog.Info("delete_file result", "agent_id", msg.AgentID, "output", msg.Output)
 	case "network_mode_result":
@@ -278,6 +281,33 @@ func (h *Hub) handleEvent(c *Client, msg *IncomingMessage) {
 		hostname = agent.Hostname
 	}
 	h.events.Record(agentID, hostname, msg.EventType, msg.Metadata)
+}
+
+// handleProcessStart routes a WMI Win32_ProcessStartTrace signal (see
+// agent/procwatch.go) straight into the same PolicyEngine.EvaluateProcesses
+// path the 30s metrics tick uses (hub.go handleMetrics below), so a process
+// that matches a kill rule gets terminated within roughly a second of
+// launching instead of waiting for the next tick. Deliberately does not go
+// through EventRecorder/the generic "event" type — EventRecorder.act (see
+// events.go) has no case for PolicyActionKill, so routing this through it
+// would silently swallow kill decisions. Also deliberately does not touch
+// UpsertProcesses/catalog.Observe/InsertMetric like handleMetrics does: this
+// is a policy-evaluation signal for one process, not a metrics snapshot, and
+// must not pollute the processes table or overwrite the agent's real CPU/RAM
+// with the zeroes this message carries.
+func (h *Hub) handleProcessStart(c *Client, msg *IncomingMessage) {
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = msg.AgentID
+	}
+	if agentID == "" || len(msg.Processes) == 0 || h.policyEngine == nil {
+		return
+	}
+	hostname := agentID
+	if agent, err := h.db.GetAgentByID(agentID); err == nil && agent != nil {
+		hostname = agent.Hostname
+	}
+	h.policyEngine.EvaluateProcesses(agentID, hostname, msg.Processes)
 }
 
 func (h *Hub) handleMetrics(c *Client, msg *IncomingMessage) {
@@ -470,6 +500,36 @@ func (h *Hub) KillProcess(agentID string, pid int, name string) (string, error) 
 	defer h.killWaiters.Delete(agentID)
 
 	if !h.SendToAgent(agentID, &OutgoingMessage{Type: "kill_process", PID: pid, ProcName: name}) {
+		return "", fmt.Errorf("agent not online")
+	}
+
+	select {
+	case output := <-ch:
+		return output, nil
+	case <-time.After(10 * time.Second):
+		return "", fmt.Errorf("kill request timed out")
+	}
+}
+
+// KillProcessByIdentity asks the agent to terminate every running instance
+// of procName, but only the ones whose own exe file reports a CompanyName
+// matching company (agent/killidentity.go verifies this via the same PE
+// version-info read agent/appmeta.go already does for the app catalog).
+// Unlike KillProcess(agentID, 0, name) — which maps to a bare
+// "taskkill /F /IM name" and would terminate any process with that name,
+// regardless of which vendor shipped it — this is for PolicyEngine's
+// app_status=blocked kill rule, where exe_name alone isn't a safe-enough
+// match: a multi-process app (e.g. a browser) needs every instance killed,
+// but a different, unrelated app that happens to share the same exe_name
+// must be left alone. Reuses the same killWaiters wait-for-reply plumbing as
+// KillProcess — the agent replies with the same "kill_result" message type
+// for both.
+func (h *Hub) KillProcessByIdentity(agentID, procName, company string) (string, error) {
+	ch := make(chan string, 1)
+	h.killWaiters.Store(agentID, ch)
+	defer h.killWaiters.Delete(agentID)
+
+	if !h.SendToAgent(agentID, &OutgoingMessage{Type: "kill_by_identity", ProcName: procName, Company: company}) {
 		return "", fmt.Errorf("agent not online")
 	}
 
