@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -119,6 +118,17 @@ func matchScore(r *PolicyRule, ctx PolicyContext) (int, bool) {
 }
 
 // ─── Module 6: File Execution Policy ───────────────────────────────────────
+//
+// Two independent reasons a running process gets evaluated against
+// policy_rules: (1) it's running from a watched location (downloads/
+// desktop/temp/usb — classifyExecutionLocation), or (2) its exe_name is
+// flagged in the applications table (a non-default status or a category),
+// regardless of where it's running. (2) exists so an app_status=blocked
+// rule fires wherever the app runs, not only if it also happens to be
+// executed from a watched folder. Everything else — the common case of an
+// ordinary, unflagged process running from Program Files/Windows — is
+// skipped via cheap in-memory map lookups (GetPolicyRelevantApps, loaded
+// once per EvaluateProcesses call), no per-process DB query.
 
 // watchedLocationMarkers maps an execution_location value to a path
 // substring that identifies it. Deliberately simple substring matching
@@ -154,18 +164,37 @@ func classifyExecutionLocation(path string) string {
 	return ""
 }
 
-// EvaluateProcesses implements Module 6: for every process whose Path falls
-// under a watched location, evaluate policy and act. Cheap for the common
-// case — most processes run from Program Files/Windows and are skipped by a
-// plain string check before any DB work happens, so this stays lightweight
-// even at 50-PC scale.
+// describeExecutionLocation renders loc for Indonesian-language
+// notification text. "" now legitimately means a process was matched by
+// app_status/category rather than location, i.e. a normal install path —
+// not "unknown".
+func describeExecutionLocation(loc string) string {
+	if loc == "" {
+		return "lokasi instalasi standar"
+	}
+	return loc
+}
+
+// EvaluateProcesses implements Module 6: evaluate every process that's
+// either running from a watched location or whose exe_name is flagged in
+// applications (see the section comment above), and act on the decision.
+// Cheap for the common case — GetPolicyRelevantApps loads the flagged-app
+// set once per call, so an ordinary unflagged process outside a watched
+// location is skipped via two map lookups, no DB round trip.
 func (p *PolicyEngine) EvaluateProcesses(agentID, hostname string, procs []Process) {
+	relevantApps, err := p.db.GetPolicyRelevantApps()
+	if err != nil {
+		slog.Error("policy: load policy-relevant apps failed", "error", err)
+		relevantApps = nil // fall back to location-only matching, don't abort the tick
+	}
+
 	var deviceGroup string
 	var groupLoaded bool
 
 	for _, proc := range procs {
 		loc := classifyExecutionLocation(proc.Path)
-		if loc == "" {
+		app, flagged := relevantApps[proc.Name]
+		if loc == "" && !flagged {
 			continue
 		}
 		if !groupLoaded {
@@ -174,14 +203,12 @@ func (p *PolicyEngine) EvaluateProcesses(agentID, hostname string, procs []Proce
 		}
 
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(proc.Path)), ".")
-		categoryID := p.lookupCategoryByExeName(proc.Name)
-		appStatus := p.lookupAppStatusByExeName(proc.Name)
 
 		decision := p.Evaluate(PolicyContext{
 			AgentID:           agentID,
 			DeviceGroup:       deviceGroup,
-			CategoryID:        categoryID,
-			AppStatus:         appStatus,
+			CategoryID:        app.CategoryID,
+			AppStatus:         app.Status,
 			FileExtension:     ext,
 			ExecutionLocation: loc,
 		})
@@ -200,40 +227,9 @@ func (p *PolicyEngine) EvaluateProcesses(agentID, hostname string, procs []Proce
 	}
 }
 
-func (p *PolicyEngine) lookupCategoryByExeName(exeName string) *int64 {
-	var cid sql.NullInt64
-	err := p.db.QueryRow(
-		`SELECT category_id FROM applications WHERE exe_name = ? AND category_id IS NOT NULL LIMIT 1`,
-		exeName,
-	).Scan(&cid)
-	if err != nil || !cid.Valid {
-		return nil
-	}
-	return &cid.Int64
-}
-
-// lookupAppStatusByExeName returns the applications.status for exeName, used
-// to let a PolicyRule target "any process belonging to an app marked
-// Blocked" directly, without going through a category first. Filters out
-// the default 'pending_review' the same way lookupCategoryByExeName filters
-// out NULL category_id — if exe_name collides across multiple applications
-// rows (different company, same generic name like "setup.exe"), prefer a
-// row that's been explicitly classified over one still sitting at default.
-func (p *PolicyEngine) lookupAppStatusByExeName(exeName string) string {
-	var status string
-	err := p.db.QueryRow(
-		`SELECT status FROM applications WHERE exe_name = ? AND status != 'pending_review' LIMIT 1`,
-		exeName,
-	).Scan(&status)
-	if err != nil {
-		return ""
-	}
-	return status
-}
-
 func (p *PolicyEngine) actOnExecution(agentID, hostname string, proc Process, loc string, decision PolicyDecision) {
 	finalAction := decision.Action
-	message := fmt.Sprintf("Kebijakan eksekusi: %s dijalankan dari %s di %s", proc.Name, loc, hostname)
+	message := fmt.Sprintf("Kebijakan eksekusi: %s dijalankan dari %s di %s", proc.Name, describeExecutionLocation(loc), hostname)
 
 	switch decision.Action {
 	case PolicyActionKill:
@@ -244,7 +240,7 @@ func (p *PolicyEngine) actOnExecution(agentID, hostname string, proc Process, lo
 		} else {
 			finalAction = EventActionKilled
 			message = fmt.Sprintf("🚫 Proses %s dari %s di %s dihentikan (kebijakan eksekusi) — %s",
-				proc.Name, loc, hostname, output)
+				proc.Name, describeExecutionLocation(loc), hostname, output)
 		}
 		p.notify(message)
 	case PolicyActionNotify:

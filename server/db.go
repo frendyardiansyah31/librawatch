@@ -1848,6 +1848,56 @@ func (db *DB) GetEnabledPolicyRules() ([]PolicyRule, error) {
 	return enabled, nil
 }
 
+// PolicyRelevantApp is the per-exe_name status/category_id the Policy
+// Engine needs to evaluate app_status/category rules — see
+// GetPolicyRelevantApps.
+type PolicyRelevantApp struct {
+	Status     string
+	CategoryID *int64
+}
+
+// GetPolicyRelevantApps returns, per exe_name, the status/category_id the
+// Policy Engine needs to match app_status/category rules against — one
+// query per metrics tick instead of a per-process query. Only
+// policy-relevant rows are included (status != 'pending_review' OR
+// category_id IS NOT NULL); an exe_name absent from the map has neither.
+// exe_name can collide across companies (unique index is on
+// (exe_name, company)) — a collision keeps whichever row SQLite returns
+// first, the same unordered-LIMIT-1 tie-break this replaces used per field.
+func (db *DB) GetPolicyRelevantApps() (map[string]PolicyRelevantApp, error) {
+	rows, err := db.Query(`
+		SELECT exe_name, status, category_id
+		FROM applications
+		WHERE exe_name <> '' AND (status != 'pending_review' OR category_id IS NOT NULL)
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]PolicyRelevantApp)
+	for rows.Next() {
+		var exeName, status string
+		var categoryID sql.NullInt64
+		if err := rows.Scan(&exeName, &status, &categoryID); err != nil {
+			return nil, err
+		}
+		if _, seen := result[exeName]; seen {
+			continue
+		}
+		app := PolicyRelevantApp{}
+		if status != "pending_review" {
+			app.Status = status
+		}
+		if categoryID.Valid {
+			cid := categoryID.Int64
+			app.CategoryID = &cid
+		}
+		result[exeName] = app
+	}
+	return result, rows.Err()
+}
+
 func (db *DB) InsertPolicyRule(r *PolicyRule) (int64, error) {
 	res, err := db.Exec(`
 		INSERT INTO policy_rules (name, event_type, category_id, app_status, file_extension, execution_location, device_group, action, enabled, created_at)

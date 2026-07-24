@@ -189,14 +189,14 @@ async function loadAgents() {
   } catch (e) {
     console.error('loadAgents:', e);
     const tbody = document.getElementById('agents-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="10" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
   }
 }
 
 function renderAgents(agents) {
   const tbody = document.getElementById('agents-tbody');
   if (!agents.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">Belum ada agent yang terhubung</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">Belum ada agent yang terhubung</td></tr>';
     return;
   }
 
@@ -216,6 +216,7 @@ function renderAgents(agents) {
       <td><span class="dot ${ag.status === 'online' ? 'online' : 'offline'}"></span></td>
       <td><strong>${esc(ag.hostname)}</strong></td>
       <td style="font-family:monospace;font-size:12px">${esc(ag.ip)}</td>
+      <td style="font-family:monospace;font-size:12px">${esc(ag.mac_address || '—')}</td>
       <td>
         <input type="text" class="device-group-input" value="${esc(ag.device_group || '')}"
           placeholder="—" onclick="event.stopPropagation()"
@@ -272,7 +273,7 @@ function makeDetailRow(id) {
   const tr = document.createElement('tr');
   tr.className = 'detail-row';
   tr.id = 'detail-' + id;
-  tr.innerHTML = `<td colspan="9"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
+  tr.innerHTML = `<td colspan="10"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
   return tr;
 }
 
@@ -1011,7 +1012,7 @@ function mapAgentsToComputers(agents) {
     const y = 2 + row;
     return {
       id: ag.id,
-      name: 'PC-' + String(i + 1).padStart(2, '0'),
+      name: ag.hostname || ('PC-' + String(i + 1).padStart(2, '0')),
       status: deriveStatus(ag),
       x, y,
       hostname: ag.hostname,

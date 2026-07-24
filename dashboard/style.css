@@ -217,6 +217,10 @@ tbody td { padding: 10px 12px; vertical-align: middle; }
 
 .empty { text-align: center; color: var(--muted); padding: 36px !important; }
 
+/* ── Applications Table ───────────────────────────────────────────────────── */
+#tab-applications tbody tr:hover { background: #64748b; color: #ffffff; }
+#tab-applications tbody tr:hover td { color: #ffffff; }
+
 /* Status dot */
 .dot {
   display: inline-block;
