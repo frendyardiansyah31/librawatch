@@ -8,26 +8,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"library-monitor/shared"
 )
 
-// PolicyContext is what an incoming event or a running process is evaluated
-// against. Empty string / nil fields mean "not applicable" for that
-// dimension, and a PolicyRule with the same field left empty means "any" —
-// see matchScore.
-type PolicyContext struct {
-	AgentID           string
-	DeviceGroup       string
-	EventType         string // '' when evaluating a running process, not an event
-	CategoryID        *int64
-	AppStatus         string // applications.status ('' when unset or not applicable, e.g. plain events)
-	FileExtension     string
-	ExecutionLocation string // downloads|desktop|temp|usb|'' (unknown/other)
-}
-
-type PolicyDecision struct {
-	Action string // log|notify|block|delete|kill (EventAction*/PolicyAction* constants)
-	Rule   *PolicyRule
-}
+// PolicyContext and PolicyDecision live in shared/policy.go now — aliased
+// here so every existing reference in this file (and elsewhere in the
+// server package) keeps compiling unchanged. See PolicyRule's alias in
+// db.go for why: the agent (agent/policycache.go) needs to run the exact
+// same matching logic against its local policy cache, so it moved to the
+// shared module both packages import instead of staying server-only.
+type PolicyContext = shared.PolicyContext
+type PolicyDecision = shared.PolicyDecision
 
 // PolicyEngine is the data-driven rule matcher Module 8 asks for — nothing
 // here is hardcoded, every dimension comes from the policy_rules table
@@ -80,80 +72,19 @@ func (p *PolicyEngine) relevantApps() (map[string]PolicyRelevantApp, error) {
 	return fresh, nil
 }
 
-// Evaluate matches ctx against every enabled policy_rules row. A rule
-// matches only if every one of its non-empty fields equals the
-// corresponding ctx field; among matching rules, the one with the most
-// non-empty fields set wins (most-specific-wins), ties broken by lowest ID
-// (oldest rule first). No match (or no rules at all) defaults to "log" —
-// Phase 2 never silently drops an event, it just doesn't escalate it.
+// Evaluate matches ctx against every enabled policy_rules row, via the same
+// shared.Evaluate/shared.MatchScore matcher the agent's local policy cache
+// runs (agent/policycache.go) — most-specific-wins scoring, ties broken by
+// lowest ID (oldest rule first), documented on shared.MatchScore. No match
+// (or no rules at all) defaults to "log" — Phase 2 never silently drops an
+// event, it just doesn't escalate it.
 func (p *PolicyEngine) Evaluate(ctx PolicyContext) PolicyDecision {
 	rules, err := p.db.GetEnabledPolicyRules()
 	if err != nil {
 		slog.Error("policy: load rules failed", "error", err)
 		return PolicyDecision{Action: EventActionLog}
 	}
-
-	var best *PolicyRule
-	bestScore := -1
-	for i := range rules {
-		r := &rules[i]
-		score, ok := matchScore(r, ctx)
-		if !ok {
-			continue
-		}
-		if score > bestScore || (score == bestScore && best != nil && r.ID < best.ID) {
-			best, bestScore = r, score
-		}
-	}
-
-	if best == nil {
-		return PolicyDecision{Action: EventActionLog}
-	}
-	return PolicyDecision{Action: best.Action, Rule: best}
-}
-
-// matchScore returns how many of the rule's non-empty dimensions matched
-// (0 for a rule with every field left as "any"), and whether the rule
-// matches ctx at all.
-func matchScore(r *PolicyRule, ctx PolicyContext) (int, bool) {
-	score := 0
-	if r.EventType != "" {
-		if r.EventType != ctx.EventType {
-			return 0, false
-		}
-		score++
-	}
-	if r.CategoryID != nil {
-		if ctx.CategoryID == nil || *r.CategoryID != *ctx.CategoryID {
-			return 0, false
-		}
-		score++
-	}
-	if r.AppStatus != "" {
-		if r.AppStatus != ctx.AppStatus {
-			return 0, false
-		}
-		score++
-	}
-	if r.FileExtension != "" {
-		if !strings.EqualFold(r.FileExtension, ctx.FileExtension) {
-			return 0, false
-		}
-		score++
-	}
-	if r.ExecutionLocation != "" {
-		if !strings.EqualFold(r.ExecutionLocation, ctx.ExecutionLocation) {
-			return 0, false
-		}
-		score++
-	}
-	if r.DeviceGroup != "" {
-		if !strings.EqualFold(r.DeviceGroup, ctx.DeviceGroup) {
-			return 0, false
-		}
-		score++
-	}
-	return score, true
+	return shared.Evaluate(rules, ctx)
 }
 
 // ─── Module 6: File Execution Policy ───────────────────────────────────────
@@ -168,40 +99,6 @@ func matchScore(r *PolicyRule, ctx PolicyContext) (int, bool) {
 // ordinary, unflagged process running from Program Files/Windows — is
 // skipped via cheap in-memory map lookups (GetPolicyRelevantApps, loaded
 // once per EvaluateProcesses call), no per-process DB query.
-
-// watchedLocationMarkers maps an execution_location value to a path
-// substring that identifies it. Deliberately simple substring matching
-// rather than a configurable-paths setting — the three named folders match
-// the brief's own examples and keep this from growing into a general path
-// rules system.
-var watchedLocationMarkers = map[string]string{
-	"downloads": `\downloads\`,
-	"desktop":   `\desktop\`,
-	"temp":      `\temp\`,
-}
-
-// classifyExecutionLocation buckets a process path into downloads/desktop/
-// temp/usb/"" (unknown or a normal Program Files/Windows install path).
-// USB detection here is a heuristic, not a lookup against Module 1's live
-// USB state: in this deployment every PC only has a C: system drive, so any
-// executable running from another drive letter is treated as external
-// media — the same thing Module 1 is watching for, without needing to
-// cross-reference the two.
-func classifyExecutionLocation(path string) string {
-	if path == "" {
-		return ""
-	}
-	if len(path) >= 2 && path[1] == ':' && !strings.EqualFold(path[:2], "c:") {
-		return "usb"
-	}
-	lower := strings.ToLower(path)
-	for loc, marker := range watchedLocationMarkers {
-		if strings.Contains(lower, marker) {
-			return loc
-		}
-	}
-	return ""
-}
 
 // describeExecutionLocation renders loc for Indonesian-language
 // notification text. "" now legitimately means a process was matched by
@@ -231,8 +128,8 @@ func (p *PolicyEngine) EvaluateProcesses(agentID, hostname string, procs []Proce
 	var groupLoaded bool
 
 	for _, proc := range procs {
-		loc := classifyExecutionLocation(proc.Path)
-		app, flagged := relevantApps[proc.Name]
+		loc := shared.ClassifyExecutionLocation(proc.Path)
+		app, flagged := relevantApps[strings.ToLower(proc.Name)]
 		if loc == "" && !flagged {
 			continue
 		}
@@ -277,16 +174,20 @@ func (p *PolicyEngine) actOnExecution(agentID, hostname string, proc Process, lo
 	finalAction := decision.Action
 	message := fmt.Sprintf("Kebijakan eksekusi: %s dijalankan dari %s di %s", proc.Name, describeExecutionLocation(loc), hostname)
 
+	start := time.Now()
+	var killOutput string
+	var killErr error
+
 	switch decision.Action {
 	case PolicyActionKill:
-		output, err := p.hub.KillProcessByIdentity(agentID, proc.Name, company)
-		if err != nil {
-			slog.Warn("policy: kill failed", "agent_id", agentID, "process", proc.Name, "error", err)
+		killOutput, killErr = p.hub.KillProcessByIdentity(agentID, proc.Name, company, proc.PID)
+		if killErr != nil {
+			slog.Warn("policy: kill failed", "agent_id", agentID, "process", proc.Name, "error", killErr)
 			finalAction = EventActionLog
 		} else {
 			finalAction = EventActionKilled
 			message = fmt.Sprintf("🚫 Proses %s dari %s di %s dihentikan (kebijakan eksekusi) — %s",
-				proc.Name, describeExecutionLocation(loc), hostname, output)
+				proc.Name, describeExecutionLocation(loc), hostname, killOutput)
 		}
 		p.notify(message)
 	case PolicyActionNotify:
@@ -302,12 +203,33 @@ func (p *PolicyEngine) actOnExecution(agentID, hostname string, proc Process, lo
 		finalAction = EventActionBlocked
 	}
 
+	ruleName := ""
+	if decision.Rule != nil {
+		ruleName = decision.Rule.Name
+	}
+	policyVersion, _ := p.db.GetPolicyVersion()
+	slog.Info("server-tick policy enforcement",
+		"policy_version", policyVersion,
+		"evaluation_source", "server_tick",
+		"pid", proc.PID,
+		"exe", proc.Name,
+		"company", company,
+		"rule", ruleName,
+		"action", decision.Action,
+		"result", finalAction,
+		"duration", time.Since(start),
+	)
+
 	metadata, _ := json.Marshal(map[string]interface{}{
 		"process":            proc.Name,
 		"pid":                proc.PID,
 		"path":               proc.Path,
 		"execution_location": loc,
 		"policy_action":      decision.Action,
+		"policy_version":     policyVersion,
+		"evaluation_source":  "server_tick",
+		"rule":               ruleName,
+		"kill_output":        killOutput,
 	})
 	if _, err := p.db.InsertEvent(agentID, "exec_policy", string(metadata), finalAction); err != nil {
 		slog.Error("policy: insert exec_policy event failed", "error", err)

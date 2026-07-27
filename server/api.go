@@ -94,6 +94,23 @@ func validateDeployRequest(typ, payload, args string) error {
 	return nil
 }
 
+// bumpPolicyVersionAndBroadcast increments the policy version (server/db.go's
+// BumpPolicyVersion) and pushes the new rule set to every connected agent
+// (Hub.BroadcastPolicyUpdate) — called after any write that changes what
+// PolicyEngine.Evaluate would decide: policy_rules create/update/delete and
+// applications status/category_id changes (Priority 4's push-based agent
+// cache). Errors are logged, not returned — a failed version bump/broadcast
+// must never fail the API request that triggered it; the agent's own
+// version-check-on-connect and fallback ticker (agent/policycache.go) will
+// still catch up eventually even if this particular push is lost.
+func bumpPolicyVersionAndBroadcast(db *DB, hub *Hub) {
+	if _, err := db.BumpPolicyVersion(); err != nil {
+		slog.Error("bumpPolicyVersionAndBroadcast: bump failed", "error", err)
+		return
+	}
+	hub.BroadcastPolicyUpdate()
+}
+
 func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter, deployer *Deployer, uploadsPath string, maxUploadMB int64) {
 	// ── Agents ──────────────────────────────────────────────────────────
 
@@ -329,6 +346,7 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			return
 		}
 		db.InsertAuditLog("update_application", strconv.FormatInt(id, 10), fmt.Sprintf("status=%s", req.Status), c.ClientIP())
+		bumpPolicyVersionAndBroadcast(db, hub)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
@@ -398,6 +416,7 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			return
 		}
 		db.InsertAuditLog("create_policy_rule", strconv.FormatInt(id, 10), rule.Name, c.ClientIP())
+		bumpPolicyVersionAndBroadcast(db, hub)
 		rule.ID = id
 		c.JSON(http.StatusOK, rule)
 	})
@@ -430,6 +449,7 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			return
 		}
 		db.InsertAuditLog("update_policy_rule", strconv.FormatInt(id, 10), rule.Name, c.ClientIP())
+		bumpPolicyVersionAndBroadcast(db, hub)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
@@ -444,6 +464,7 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			return
 		}
 		db.InsertAuditLog("delete_policy_rule", strconv.FormatInt(id, 10), "", c.ClientIP())
+		bumpPolicyVersionAndBroadcast(db, hub)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 

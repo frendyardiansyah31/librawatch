@@ -244,7 +244,7 @@ func main() {
 	hub.alerter = alerter
 	go alerter.StartOfflineChecker()
 
-	deployer := NewDeployer(db, hub)
+	deployer := NewDeployer(db, hub, cfg.Uploads.Path)
 	hub.deployer = deployer
 	go deployer.StartLeaseSweeper()
 

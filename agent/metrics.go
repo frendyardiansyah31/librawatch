@@ -30,6 +30,7 @@ type ProcessInfo struct {
 	Company        string `json:"company,omitempty"`
 	Description    string `json:"description,omitempty"`
 	ProductVersion string `json:"product_version,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
 	Size           int64  `json:"size,omitempty"`
 	FileCreatedAt  string `json:"file_created_at,omitempty"`
 	FileModifiedAt string `json:"file_modified_at,omitempty"`
@@ -91,6 +92,7 @@ func collectMetrics(agentID, hostname, ip, osName, meshID, macAddress string) (*
 				info.Company = meta.Company
 				info.Description = meta.Description
 				info.ProductVersion = meta.ProductVersion
+				info.SHA256 = meta.SHA256
 				info.Size = meta.Size
 				info.FileCreatedAt = meta.FileCreatedAt.Format(time.RFC3339)
 				info.FileModifiedAt = meta.FileModifiedAt.Format(time.RFC3339)

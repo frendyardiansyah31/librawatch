@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"library-monitor/shared"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -51,6 +53,8 @@ type IncomingMessage struct {
 	// event fields (Phase 2 — usb_inserted, download_created, etc; see server/events.go)
 	EventType string                 `json:"event_type"`
 	Metadata  map[string]interface{} `json:"metadata"`
+	// policy_version_check field (Priority 4 — agent's currently-cached policy version)
+	PolicyVersion int64 `json:"policy_version"`
 }
 
 // OutgoingMessage covers all server→agent message types.
@@ -60,6 +64,7 @@ type OutgoingMessage struct {
 	Attempt  *int   `json:"attempt,omitempty"`
 	Payload  string `json:"payload,omitempty"`
 	Filename string `json:"filename,omitempty"`
+	Checksum string `json:"checksum,omitempty"` // file_deploy: sha256 hex of the uploaded file
 	Args     string `json:"args,omitempty"`
 	Lines    int    `json:"lines,omitempty"`
 	Action   string `json:"action,omitempty"`    // deepfreeze: thaw/freeze/query_df
@@ -70,6 +75,22 @@ type OutgoingMessage struct {
 	Company  string `json:"company,omitempty"`   // kill_by_identity: expected CompanyName, verified against each matching process's file before it's killed
 
 	NetworkMode string `json:"network_mode,omitempty"` // network_mode: desired ethernet/wifi/both
+
+	// policy_update fields (Priority 4/5) — pushed to every connected agent
+	// whenever the policy version bumps, and sent as a direct reply to a
+	// stale policy_version_check. DeviceGroup is this specific agent's own
+	// current device_group (agents.device_group), included so the agent can
+	// evaluate DeviceGroup-scoped rules locally without a second round-trip —
+	// it has no other way to know its own assigned group. PolicyApps mirrors
+	// GetPolicyRelevantApps (keyed by exe_name) so the agent can evaluate
+	// AppStatus/CategoryID-scoped rules locally too — without it, the agent
+	// would only know the rules themselves, not which apps are currently
+	// blocked/categorized, which is exactly the data Priority 5's realtime
+	// enforcement needs for the app_status=blocked case (the original Zoom bug).
+	PolicyVersion int64                               `json:"policy_version,omitempty"`
+	PolicyRules   []PolicyRule                        `json:"policy_rules,omitempty"`
+	PolicyApps    map[string]shared.PolicyRelevantApp `json:"policy_apps,omitempty"`
+	DeviceGroup   string                              `json:"device_group,omitempty"`
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
@@ -139,15 +160,15 @@ func (c *Client) writePump() {
 // ─── Hub ───────────────────────────────────────────────────────────────────
 
 type Hub struct {
-	mu            sync.RWMutex
-	clients       map[string]*Client
-	db            *DB
-	alerter       *Alerter
-	deployer      *Deployer
-	batcher       *MetricsBatcher
-	catalog       *Catalog
-	policyEngine  *PolicyEngine
-	events        *EventRecorder
+	mu                 sync.RWMutex
+	clients            map[string]*Client
+	db                 *DB
+	alerter            *Alerter
+	deployer           *Deployer
+	batcher            *MetricsBatcher
+	catalog            *Catalog
+	policyEngine       *PolicyEngine
+	events             *EventRecorder
 	authToken          string   // if non-empty, WebSocket clients must provide ?token=
 	lastMetricLog      sync.Map // agentID → time.Time, throttle log to every 5 min
 	logWaiters         sync.Map // agentID → chan string, pending log relay
@@ -260,7 +281,115 @@ func (h *Hub) handleMessage(c *Client, data []byte) {
 		slog.Info("delete_file result", "agent_id", msg.AgentID, "output", msg.Output)
 	case "network_mode_result":
 		h.handleNetworkModeResult(&msg)
+	case "policy_version_check":
+		h.handlePolicyVersionCheck(c, &msg)
+	case "policy_enforcement":
+		h.handlePolicyEnforcement(c, &msg)
 	}
+}
+
+// handlePolicyEnforcement records a policy decision the agent already
+// evaluated AND enforced locally (Priority 5 — agent/procwatch.go's realtime
+// local-kill path, using its cached policy from Priority 4). This is
+// audit-only: unlike handleEvent (which runs a fresh EventRecorder.Record →
+// PolicyEngine.Evaluate → act pass for discrete OS events), this must NOT
+// re-evaluate or re-act — the agent already made and carried out the
+// decision before this message was even sent, and EventRecorder.act has no
+// PolicyActionKill case, so routing this through it would silently
+// overwrite an already-correct "killed" outcome with whatever act() falls
+// back to. Just persist exactly what happened.
+func (h *Hub) handlePolicyEnforcement(c *Client, msg *IncomingMessage) {
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = msg.AgentID
+	}
+	if agentID == "" || msg.EventType == "" {
+		return
+	}
+	metadataJSON, err := json.Marshal(msg.Metadata)
+	if err != nil {
+		slog.Error("policy_enforcement: marshal metadata failed", "agent_id", agentID, "error", err)
+		return
+	}
+	if _, err := h.db.InsertEvent(agentID, msg.EventType, string(metadataJSON), msg.Status); err != nil {
+		slog.Error("policy_enforcement: insert event failed", "agent_id", agentID, "error", err)
+	}
+}
+
+// handlePolicyVersionCheck answers an agent's report of its currently-cached
+// policy version (sent on connect, and periodically as the agent's fallback
+// safety check — see agent/policycache.go) — replying with a full
+// policy_update only if the agent's version is stale, so an agent that's
+// already current doesn't get a needless payload. Mirrors
+// BroadcastPolicyUpdate's per-agent DeviceGroup lookup.
+func (h *Hub) handlePolicyVersionCheck(c *Client, msg *IncomingMessage) {
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = msg.AgentID
+	}
+	if agentID == "" {
+		return
+	}
+
+	currentVersion, err := h.db.GetPolicyVersion()
+	if err != nil {
+		slog.Error("policy_version_check: get version failed", "agent_id", agentID, "error", err)
+		return
+	}
+	if msg.PolicyVersion >= currentVersion {
+		return
+	}
+
+	if err := h.sendPolicyUpdateTo(agentID, currentVersion); err != nil {
+		slog.Error("policy_version_check: send update failed", "agent_id", agentID, "error", err)
+	}
+}
+
+// BroadcastPolicyUpdate pushes the current policy_rules + version to every
+// connected agent. Called after any write that changes what
+// PolicyEngine.Evaluate would decide (policy_rules CRUD, applications
+// status/category changes) so the agent's local cache (Priority 4) never
+// drifts far from the server's source of truth while online. Policy edits
+// are rare/cheap, so a broadcast to every client on every edit is
+// inexpensive — no batching/coalescing needed.
+func (h *Hub) BroadcastPolicyUpdate() {
+	version, err := h.db.GetPolicyVersion()
+	if err != nil {
+		slog.Error("BroadcastPolicyUpdate: get version failed", "error", err)
+		return
+	}
+	for _, agentID := range h.AllOnlineIDs() {
+		if err := h.sendPolicyUpdateTo(agentID, version); err != nil {
+			slog.Error("BroadcastPolicyUpdate: send failed", "agent_id", agentID, "error", err)
+		}
+	}
+}
+
+// sendPolicyUpdateTo builds and sends one agent's policy_update — rules are
+// identical for everyone, but DeviceGroup is looked up per-agent so
+// DeviceGroup-scoped rules can be evaluated locally on the agent without a
+// second round-trip.
+func (h *Hub) sendPolicyUpdateTo(agentID string, version int64) error {
+	rules, err := h.db.GetEnabledPolicyRules()
+	if err != nil {
+		return err
+	}
+	apps, err := h.db.GetPolicyRelevantApps()
+	if err != nil {
+		return err
+	}
+	deviceGroup, _ := h.db.GetAgentDeviceGroup(agentID)
+
+	if !h.SendToAgent(agentID, &OutgoingMessage{
+		Type:          "policy_update",
+		PolicyVersion: version,
+		PolicyRules:   rules,
+		PolicyApps:    apps,
+		DeviceGroup:   deviceGroup,
+	}) {
+		return fmt.Errorf("agent not online")
+	}
+	return nil
 }
 
 // handleEvent routes a Phase 2 system-policy event (USB, download, desktop/
@@ -511,25 +640,30 @@ func (h *Hub) KillProcess(agentID string, pid int, name string) (string, error) 
 	}
 }
 
-// KillProcessByIdentity asks the agent to terminate every running instance
-// of procName, but only the ones whose own exe file reports a CompanyName
-// matching company (agent/killidentity.go verifies this via the same PE
-// version-info read agent/appmeta.go already does for the app catalog).
+// KillProcessByIdentity asks the agent to terminate the specific process
+// instance identified by pid — verified live against procName/company on
+// the agent side before being killed (agent/killidentity.go) — falling back
+// to an enumerate-by-name(+company) sweep only if that PID no longer
+// matches (already exited, or recycled by an unrelated process in the gap
+// between this decision and the agent receiving it). pid is always a live
+// value from the current decision (a proc_start event or the current
+// metrics tick) — callers must never persist or reuse a PID across
+// decisions. Pass pid=0 when it's genuinely unknown, which skips straight to
+// the name-based sweep.
+//
 // Unlike KillProcess(agentID, 0, name) — which maps to a bare
 // "taskkill /F /IM name" and would terminate any process with that name,
 // regardless of which vendor shipped it — this is for PolicyEngine's
 // app_status=blocked kill rule, where exe_name alone isn't a safe-enough
-// match: a multi-process app (e.g. a browser) needs every instance killed,
-// but a different, unrelated app that happens to share the same exe_name
-// must be left alone. Reuses the same killWaiters wait-for-reply plumbing as
+// match. Reuses the same killWaiters wait-for-reply plumbing as
 // KillProcess — the agent replies with the same "kill_result" message type
 // for both.
-func (h *Hub) KillProcessByIdentity(agentID, procName, company string) (string, error) {
+func (h *Hub) KillProcessByIdentity(agentID, procName, company string, pid int) (string, error) {
 	ch := make(chan string, 1)
 	h.killWaiters.Store(agentID, ch)
 	defer h.killWaiters.Delete(agentID)
 
-	if !h.SendToAgent(agentID, &OutgoingMessage{Type: "kill_by_identity", ProcName: procName, Company: company}) {
+	if !h.SendToAgent(agentID, &OutgoingMessage{Type: "kill_by_identity", ProcName: procName, Company: company, PID: pid}) {
 		return "", fmt.Errorf("agent not online")
 	}
 

@@ -63,12 +63,13 @@ func (c *Catalog) observeOne(agentID string, p Process) {
 
 	if !found {
 		var meta *AppMetadata
-		if p.ProductName != "" || p.Company != "" || p.Description != "" || p.ProductVersion != "" {
+		if p.ProductName != "" || p.Company != "" || p.Description != "" || p.ProductVersion != "" || p.SHA256 != "" {
 			meta = &AppMetadata{
 				ProductName:    p.ProductName,
 				Company:        p.Company,
 				Description:    p.Description,
 				ProductVersion: p.ProductVersion,
+				SHA256:         p.SHA256,
 			}
 		}
 		appID, err = c.db.UpsertApplication(p.Name, p.Company, meta)

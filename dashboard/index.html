@@ -72,10 +72,16 @@
     <main>
       <!-- ── Agents ─────────────────────────────────────────────────────────── -->
       <div id="tab-agents" class="tab-content active">
+        <div class="agents-menu-bar">
+          <span id="wake-select-count" class="wake-select-count">0 PC dipilih</span>
+          <button class="btn-primary" id="btn-wake-selected" onclick="wakeSelectedAgents()" disabled>⚡ Wake</button>
+          <button class="btn-sm btn-danger" id="btn-shutdown-selected" onclick="shutdownSelectedAgents()" disabled>⏻ Shutdown</button>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
+                <th style="width: 32px"></th>
                 <th style="width: 26px"></th>
                 <th>Hostname</th>
                 <th>IP</th>
@@ -90,7 +96,7 @@
             </thead>
             <tbody id="agents-tbody">
               <tr>
-                <td colspan="10" class="empty">Memuat data…</td>
+                <td colspan="11" class="empty">Memuat data…</td>
               </tr>
             </tbody>
           </table>

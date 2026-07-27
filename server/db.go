@@ -7,7 +7,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"library-monitor/shared"
 
 	_ "modernc.org/sqlite"
 )
@@ -105,6 +108,7 @@ type Process struct {
 	Company        string `json:"company,omitempty"`
 	Description    string `json:"description,omitempty"`
 	ProductVersion string `json:"product_version,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
 	Size           int64  `json:"size,omitempty"`
 	FileCreatedAt  string `json:"file_created_at,omitempty"`
 	FileModifiedAt string `json:"file_modified_at,omitempty"`
@@ -173,6 +177,7 @@ type AppMetadata struct {
 	Company        string
 	Description    string
 	ProductVersion string
+	SHA256         string
 	Size           int64
 	FileCreatedAt  time.Time
 	FileModifiedAt time.Time
@@ -202,30 +207,22 @@ type Event struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// PolicyRuleAction values, validated in server/api.go.
-const (
-	PolicyActionLog    = "log"
-	PolicyActionNotify = "notify"
-	PolicyActionBlock  = "block"
-	PolicyActionDelete = "delete"
-	PolicyActionKill   = "kill"
-)
+// PolicyRule and the PolicyAction* constants live in shared/policy.go now —
+// aliased here so every existing server-side reference (this file, api.go,
+// hub.go, policy.go, tests) keeps compiling unchanged. Moving them out of
+// server-only code lets the agent (agent/policycache.go) run the exact same
+// rule-matching logic (shared.Evaluate/shared.MatchScore) against its local
+// policy cache instead of a hand-duplicated copy that could drift from the
+// server's.
+type PolicyRule = shared.PolicyRule
 
-// PolicyRule is one data-driven rule the Policy Engine (server/policy.go)
-// matches against. Empty string fields mean "any" for that dimension.
-type PolicyRule struct {
-	ID                int64     `json:"id"`
-	Name              string    `json:"name"`
-	EventType         string    `json:"event_type"`
-	CategoryID        *int64    `json:"category_id"`
-	AppStatus         string    `json:"app_status"`
-	FileExtension     string    `json:"file_extension"`
-	ExecutionLocation string    `json:"execution_location"`
-	DeviceGroup       string    `json:"device_group"`
-	Action            string    `json:"action"`
-	Enabled           bool      `json:"enabled"`
-	CreatedAt         time.Time `json:"created_at"`
-}
+const (
+	PolicyActionLog    = shared.PolicyActionLog
+	PolicyActionNotify = shared.PolicyActionNotify
+	PolicyActionBlock  = shared.PolicyActionBlock
+	PolicyActionDelete = shared.PolicyActionDelete
+	PolicyActionKill   = shared.PolicyActionKill
+)
 
 type Alert struct {
 	ID      int64     `json:"id"`
@@ -1371,6 +1368,45 @@ func (db *DB) GetSetting(key string) (string, error) {
 	return value, err
 }
 
+// policyVersionSettingKey is the settings-table key used to track the
+// current policy version — reuses the existing generic key/value settings
+// table (see SetSetting/GetSetting above) instead of adding a dedicated
+// schema/table just for one counter.
+const policyVersionSettingKey = "policy_version"
+
+// BumpPolicyVersion atomically increments the policy version counter in one
+// statement (SQLite serializes writes anyway, but doing the increment in SQL
+// rather than read-modify-write in Go avoids a lost-update race between
+// concurrent callers) and returns the new value. Call this on every write
+// that changes what PolicyEngine.Evaluate would decide for some process:
+// policy_rules create/update/delete/enable-toggle, and applications
+// status/category_id changes (UpdateApplicationStatus). Connected agents
+// are pushed a policy_update as soon as this changes — see
+// Hub.BroadcastPolicyUpdate.
+func (db *DB) BumpPolicyVersion() (int64, error) {
+	if _, err := db.Exec(`
+		INSERT INTO settings (key, value) VALUES (?, '1')
+		ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+	`, policyVersionSettingKey); err != nil {
+		return 0, err
+	}
+	return db.GetPolicyVersion()
+}
+
+// GetPolicyVersion returns the current policy version (0 if never bumped).
+func (db *DB) GetPolicyVersion() (int64, error) {
+	value, err := db.GetSetting(policyVersionSettingKey)
+	if err != nil {
+		return 0, err
+	}
+	if value == "" {
+		return 0, nil
+	}
+	var version int64
+	_, err = fmt.Sscanf(value, "%d", &version)
+	return version, err
+}
+
 func (db *DB) GetAllSettings() (map[string]string, error) {
 	rows, err := db.Query(`SELECT key, value FROM settings`)
 	if err != nil {
@@ -1504,9 +1540,10 @@ func (db *DB) GetAllCategories() ([]Category, error) {
 func (db *DB) UpsertApplication(exeName, company string, meta *AppMetadata) (int64, error) {
 	now := fmtTime(nowWIB())
 
-	var productName, description, productVersion string
+	var productName, description, productVersion, sha256sum string
 	if meta != nil {
 		productName, description, productVersion = meta.ProductName, meta.Description, meta.ProductVersion
+		sha256sum = meta.SHA256
 	}
 
 	// The conflict target must restate idx_applications_identity's partial
@@ -1516,14 +1553,15 @@ func (db *DB) UpsertApplication(exeName, company string, meta *AppMetadata) (int
 	// UNIQUE constraint" (caught via live testing against a real agent,
 	// which sends real exe names on every call to this function).
 	_, err := db.Exec(`
-		INSERT INTO applications (exe_name, company, product_name, description, product_version, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO applications (exe_name, company, product_name, description, product_version, sha256, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(exe_name, company) WHERE exe_name <> '' DO UPDATE SET
 			product_name    = CASE WHEN excluded.product_name    <> '' THEN excluded.product_name    ELSE applications.product_name    END,
 			description     = CASE WHEN excluded.description     <> '' THEN excluded.description     ELSE applications.description     END,
 			product_version = CASE WHEN excluded.product_version <> '' THEN excluded.product_version ELSE applications.product_version END,
+			sha256          = CASE WHEN excluded.sha256          <> '' THEN excluded.sha256          ELSE applications.sha256           END,
 			updated_at      = excluded.updated_at
-	`, exeName, company, productName, description, productVersion, AppStatusPendingReview, now, now)
+	`, exeName, company, productName, description, productVersion, sha256sum, AppStatusPendingReview, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -1685,10 +1723,35 @@ func (db *DB) GetApplicationByID(id int64) (*ApplicationDetail, error) {
 	return &ApplicationDetail{ApplicationWithStats: *found, Sightings: sightings}, nil
 }
 
+// UpdateApplicationStatus sets status/category_id on the given row, then
+// propagates the same status/category_id to any other row identified as the
+// same real-world app by (product_name, company) — see
+// UpsertApplicationByProduct's doc comment: install detection (exe_name=”)
+// and process detection (real exe_name) can create two separate rows for one
+// app, and they're never automatically unified. Without this propagation,
+// editing one row (e.g. from the Applications tab) silently leaves the other
+// at its old status, and GetPolicyRelevantApps — keyed by exe_name, requires
+// exe_name <> ” — would never see a block applied to the exe_name=” row.
 func (db *DB) UpdateApplicationStatus(id int64, status string, categoryID *int64) error {
-	_, err := db.Exec(
+	now := fmtTime(nowWIB())
+	if _, err := db.Exec(
 		`UPDATE applications SET status = ?, category_id = ?, updated_at = ? WHERE id = ?`,
-		status, categoryID, fmtTime(nowWIB()), id,
+		status, categoryID, now, id,
+	); err != nil {
+		return err
+	}
+
+	var productName, company string
+	if err := db.QueryRow(`SELECT product_name, company FROM applications WHERE id = ?`, id).Scan(&productName, &company); err != nil {
+		return err
+	}
+	if productName == "" {
+		return nil
+	}
+	_, err := db.Exec(
+		`UPDATE applications SET status = ?, category_id = ?, updated_at = ?
+		 WHERE id <> ? AND product_name = ? COLLATE NOCASE AND company = ? COLLATE NOCASE`,
+		status, categoryID, now, id, productName, company,
 	)
 	return err
 }
@@ -1848,21 +1911,12 @@ func (db *DB) GetEnabledPolicyRules() ([]PolicyRule, error) {
 	return enabled, nil
 }
 
-// PolicyRelevantApp is the per-exe_name status/category_id the Policy
-// Engine needs to evaluate app_status/category rules — see
-// GetPolicyRelevantApps.
-type PolicyRelevantApp struct {
-	Status     string
-	CategoryID *int64
-	// Company is applications.company for the matched row — carried through
-	// so a kill decision can tell the agent exactly which vendor's exe_name
-	// to terminate (KillProcessByIdentity/"kill_by_identity"), instead of
-	// killing any process that merely shares the exe_name. Empty is a valid,
-	// exact value: an app with no recorded company only matches processes
-	// whose own file metadata also reports no CompanyName, not to a random
-	// unrelated app.
-	Company string
-}
+// PolicyRelevantApp lives in shared/policy.go now (Priority 5 needs the
+// agent to have this same per-exe_name status/category_id/company shape
+// locally — see PolicyCache.RelevantApps) — aliased here so
+// GetPolicyRelevantApps below and every other server-side reference keeps
+// compiling unchanged.
+type PolicyRelevantApp = shared.PolicyRelevantApp
 
 // GetPolicyRelevantApps returns, per exe_name, the status/category_id/company
 // the Policy Engine needs to match app_status/category rules against and to
@@ -1873,6 +1927,19 @@ type PolicyRelevantApp struct {
 // companies (unique index is on (exe_name, company)) — a collision keeps
 // whichever row SQLite returns first, the same unordered-LIMIT-1 tie-break
 // this replaces used per field.
+//
+// Keyed by strings.ToLower(exeName): Windows filenames are inherently
+// case-insensitive, and different sources report a running process's name
+// with different casing — gopsutil's Process.Name() (used by the 30s
+// metrics tick, catalog.go) vs WMI's Win32_ProcessStartTrace.ProcessName
+// (used by the agent's realtime local-enforcement path, agent/procwatch.go)
+// are not guaranteed to agree. A case-sensitive map here silently broke the
+// realtime path — it never fired even once, since its WMI-sourced lookups
+// never matched a key populated from a gopsutil-sourced name — while the
+// metrics-tick path (self-consistently gopsutil-to-gopsutil) appeared to
+// work fine. Every caller of this map (server/policy.go's EvaluateProcesses,
+// agent/policycache.go's evaluateProcessLocally) must look up via the same
+// strings.ToLower(name) normalization.
 func (db *DB) GetPolicyRelevantApps() (map[string]PolicyRelevantApp, error) {
 	rows, err := db.Query(`
 		SELECT exe_name, status, category_id, company
@@ -1891,7 +1958,8 @@ func (db *DB) GetPolicyRelevantApps() (map[string]PolicyRelevantApp, error) {
 		if err := rows.Scan(&exeName, &status, &categoryID, &company); err != nil {
 			return nil, err
 		}
-		if _, seen := result[exeName]; seen {
+		key := strings.ToLower(exeName)
+		if _, seen := result[key]; seen {
 			continue
 		}
 		app := PolicyRelevantApp{Company: company}
@@ -1902,7 +1970,7 @@ func (db *DB) GetPolicyRelevantApps() (map[string]PolicyRelevantApp, error) {
 			cid := categoryID.Int64
 			app.CategoryID = &cid
 		}
-		result[exeName] = app
+		result[key] = app
 	}
 	return result, rows.Err()
 }

@@ -41,7 +41,7 @@ var notImplementedActions = map[string]bool{
 }
 
 var (
-	commandProcessNameRe       = regexp.MustCompile(`^[A-Za-z0-9_.\-]+\.exe$`)
+	commandProcessNameRe        = regexp.MustCompile(`^[A-Za-z0-9_.\-]+\.exe$`)
 	commandMessageControlCharRe = regexp.MustCompile(`[\x00-\x1f\x7f]`)
 )
 

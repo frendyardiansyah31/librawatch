@@ -108,4 +108,3 @@ func TestCreateWakeCommand_MultiTargetPartialFailure(t *testing.T) {
 		}
 	})
 }
-

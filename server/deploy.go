@@ -2,9 +2,14 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -13,12 +18,13 @@ import (
 const leaseSweepInterval = 30 * time.Second
 
 type Deployer struct {
-	db  *DB
-	hub *Hub
+	db          *DB
+	hub         *Hub
+	uploadsPath string
 }
 
-func NewDeployer(db *DB, hub *Hub) *Deployer {
-	return &Deployer{db: db, hub: hub}
+func NewDeployer(db *DB, hub *Hub, uploadsPath string) *Deployer {
+	return &Deployer{db: db, hub: hub, uploadsPath: uploadsPath}
 }
 
 // CreateJob creates a deploy job, inserts pending result rows for each target,
@@ -215,9 +221,15 @@ func (d *Deployer) dispatch(agentID string, job *DeployJob, attempt int) bool {
 	switch job.Type {
 	case "file_deploy":
 		msg.Filename = job.Payload // payload is the filename
+		if sum, err := d.fileChecksum(job.Payload); err != nil {
+			slog.Warn("file checksum failed, dispatching without verification",
+				"job_id", job.ID, "filename", job.Payload, "error", err)
+		} else {
+			msg.Checksum = sum
+		}
 	case "deepfreeze":
-		msg.Action = job.Payload   // thaw / freeze / query_df
-		msg.Password = job.Args    // optional DF password
+		msg.Action = job.Payload // thaw / freeze / query_df
+		msg.Password = job.Args  // optional DF password
 	case "install_ssh":
 		msg.Action = "install_ssh"
 		msg.Args = job.Args // admin_ip passed via args
@@ -227,6 +239,22 @@ func (d *Deployer) dispatch(agentID string, job *DeployJob, attempt int) bool {
 		slog.Info("deploy dispatched", "job_id", job.ID, "agent_id", agentID, "type", job.Type)
 	}
 	return sent
+}
+
+// fileChecksum computes the sha256 hex digest of an uploaded file, so the
+// agent can verify what it downloaded before executing it.
+func (d *Deployer) fileChecksum(filename string) (string, error) {
+	f, err := os.Open(filepath.Join(d.uploadsPath, filepath.Base(filename)))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // DispatchPending delivers the next queued job to an agent that just came

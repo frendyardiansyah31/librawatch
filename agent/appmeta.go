@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -11,17 +14,23 @@ import (
 
 // AppMetadata carries the facts extractMetadataIfNew pulls from a single
 // executable: PE version-info resource fields plus filesystem stat data.
-// Extending this later with SHA256 / digital-signature fields only means
-// adding to this struct and populating it here — nothing else in the
-// pipeline (metrics.go, the server catalog) needs to change shape.
+// SHA256/OriginalFilename are exactly the extension this struct's original
+// doc comment anticipated: "adding to this struct and populating it here —
+// nothing else in the pipeline needs to change shape." SHA256 is sent to
+// the server (see metrics.go) to populate the applications.sha256 column;
+// OriginalFilename stays agent-local for now — it feeds shared.ApplicationIdentity
+// for local identity matching (see killidentity.go) but there's no server-side
+// column or established need for it yet, so it isn't wired over the wire.
 type AppMetadata struct {
-	ProductName    string
-	Company        string
-	Description    string
-	ProductVersion string
-	Size           int64
-	FileCreatedAt  time.Time
-	FileModifiedAt time.Time
+	ProductName      string
+	Company          string
+	Description      string
+	ProductVersion   string
+	OriginalFilename string
+	SHA256           string
+	Size             int64
+	FileCreatedAt    time.Time
+	FileModifiedAt   time.Time
 }
 
 // metaExtracted caches which executable paths have already had their
@@ -56,9 +65,31 @@ func extractMetadataIfNew(path string) *AppMetadata {
 		meta.Company = info["CompanyName"]
 		meta.Description = info["FileDescription"]
 		meta.ProductVersion = info["ProductVersion"]
+		meta.OriginalFilename = info["OriginalFilename"]
+	}
+	if sum, err := hashFileSHA256(path); err == nil {
+		meta.SHA256 = sum
 	}
 
 	return meta
+}
+
+// hashFileSHA256 returns the lowercase-hex SHA256 of the file at path. Runs
+// once per (agent session, path) — gated by the same metaExtracted dedup
+// map as the rest of extractMetadataIfNew — so a frequently-reported process
+// doesn't get re-hashed every metrics cycle.
+func hashFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // getFileCreationTime reads the Windows-specific creation timestamp, which
@@ -83,8 +114,9 @@ func getFileCreationTime(path string) (time.Time, error) {
 }
 
 // readVersionInfo extracts the standard VERSIONINFO string fields (Product
-// Name, Company Name, File Description, Product Version) embedded in a
-// Windows PE file's resources, via the same GetFileVersionInfo/VerQueryValue
+// Name, Company Name, File Description, Product Version, Original Filename)
+// embedded in a Windows PE file's resources, via the same
+// GetFileVersionInfo/VerQueryValue
 // APIs Explorer's "Details" tab uses. Returns an error if the file has no
 // version resource (common for scripts/portable tools — not treated as fatal
 // by the caller).
@@ -112,7 +144,7 @@ func readVersionInfo(path string) (map[string]string, error) {
 	}
 
 	fields := map[string]string{}
-	for _, key := range []string{"ProductName", "CompanyName", "FileDescription", "ProductVersion"} {
+	for _, key := range []string{"ProductName", "CompanyName", "FileDescription", "ProductVersion", "OriginalFilename"} {
 		subBlock := `\StringFileInfo\` + langCodePage + `\` + key
 		var valuePtr unsafe.Pointer
 		var valueLen uint32

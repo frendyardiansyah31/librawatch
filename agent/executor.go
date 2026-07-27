@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -81,18 +82,24 @@ func executeCommand(agentID string, msg map[string]interface{}) {
 func deployFile(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	filename, _ := msg["filename"].(string)
+	checksum, _ := msg["checksum"].(string)
 	args, _ := msg["args"].(string)
 	attempt := msg["attempt"]
 
 	logMsg("INFO", "Deploying file job=%s filename=%s", jobID, filename)
 
-	localPath, err := downloadFile(filename)
+	localPath, err := downloadFile(filename, checksum)
 	if err != nil {
 		sendExecResult(agentID, jobID, attempt, psResult{
 			Status: "error", Output: "download failed: " + err.Error(), ExitCode: -1,
 		})
 		return
 	}
+	defer func() {
+		if err := os.Remove(localPath); err != nil {
+			logMsg("WARN", "Cleanup temp file failed: %s: %v", localPath, err)
+		}
+	}()
 
 	// Escape single quotes so they cannot break out of the PS string literal.
 	safePath := strings.ReplaceAll(localPath, "'", "''")

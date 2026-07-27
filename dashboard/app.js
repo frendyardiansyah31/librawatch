@@ -2,6 +2,7 @@
 
 // ── State ──────────────────────────────────────────────────────────────────
 let allAgents     = [];
+let selectedAgents = new Set();
 let deployTargets = new Set();
 let uploadedFile  = null;
 let expandedRows  = new Set();
@@ -189,14 +190,15 @@ async function loadAgents() {
   } catch (e) {
     console.error('loadAgents:', e);
     const tbody = document.getElementById('agents-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="10" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
   }
 }
 
 function renderAgents(agents) {
   const tbody = document.getElementById('agents-tbody');
   if (!agents.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">Belum ada agent yang terhubung</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">Belum ada agent yang terhubung</td></tr>';
+    updateAgentSelectionToolbar();
     return;
   }
 
@@ -213,6 +215,11 @@ function renderAgents(agents) {
       : `<button class="btn-sm" disabled>MeshCentral</button>`;
 
     tr.innerHTML = `
+      <td onclick="event.stopPropagation()">
+        <input type="checkbox" class="agent-select-checkbox"
+          ${selectedAgents.has(ag.id) ? 'checked' : ''}
+          onchange="toggleAgentSelected('${esc(ag.id)}', this.checked)">
+      </td>
       <td><span class="dot ${ag.status === 'online' ? 'online' : 'offline'}"></span></td>
       <td><strong>${esc(ag.hostname)}</strong></td>
       <td style="font-family:monospace;font-size:12px">${esc(ag.ip)}</td>
@@ -252,6 +259,8 @@ function renderAgents(agents) {
       loadAgentDetail(ag.id, detTr);
     }
   });
+
+  updateAgentSelectionToolbar();
 }
 
 function toggleAgentRow(id) {
@@ -273,8 +282,81 @@ function makeDetailRow(id) {
   const tr = document.createElement('tr');
   tr.className = 'detail-row';
   tr.id = 'detail-' + id;
-  tr.innerHTML = `<td colspan="10"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
+  tr.innerHTML = `<td colspan="11"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
   return tr;
+}
+
+// ── Wake toolbar (PC/Agents tab) ─────────────────────────────────────────────
+function toggleAgentSelected(id, checked) {
+  if (checked) selectedAgents.add(id);
+  else         selectedAgents.delete(id);
+  updateAgentSelectionToolbar();
+}
+
+function updateAgentSelectionToolbar() {
+  const countEl    = document.getElementById('wake-select-count');
+  const wakeBtn    = document.getElementById('btn-wake-selected');
+  const shutdownBtn = document.getElementById('btn-shutdown-selected');
+  if (!countEl || !wakeBtn || !shutdownBtn) return;
+  countEl.textContent = `${selectedAgents.size} PC dipilih`;
+  wakeBtn.disabled     = selectedAgents.size === 0;
+  shutdownBtn.disabled = selectedAgents.size === 0;
+}
+
+async function wakeSelectedAgents() {
+  const targets = Array.from(selectedAgents)
+    .map(id => allAgents.find(a => a.id === id))
+    .filter(Boolean);
+  if (!targets.length) return;
+
+  const names = targets.map(a => a.hostname).join(', ');
+  if (!confirm(`Kirim Wake-on-LAN ke ${targets.length} PC (${names})?\n\nHanya berfungsi untuk PC dengan MAC address yang sudah tercatat.`)) return;
+
+  const btn = document.getElementById('btn-wake-selected');
+  btn.disabled = true;
+  try {
+    const outcomes = await Promise.allSettled(
+      targets.map(ag => api('POST', '/v1/commands', { target: ag.id, action: 'wake' }))
+    );
+    const failed = [];
+    outcomes.forEach((res, i) => {
+      if (res.status === 'rejected') failed.push(`${targets[i].hostname} (${res.reason.message})`);
+    });
+    const okCount = targets.length - failed.length;
+    let msg = `✓ Wake terkirim ke ${okCount} PC.`;
+    if (failed.length) msg += `\nGagal: ${failed.join(', ')}`;
+    alert(msg);
+  } finally {
+    updateAgentSelectionToolbar();
+  }
+}
+
+async function shutdownSelectedAgents() {
+  const targets = Array.from(selectedAgents)
+    .map(id => allAgents.find(a => a.id === id))
+    .filter(Boolean);
+  if (!targets.length) return;
+
+  const names = targets.map(a => a.hostname).join(', ');
+  if (!confirm(`Shutdown ${targets.length} PC (${names})?\n\nPC akan benar-benar mati, bukan sekadar simulasi.`)) return;
+
+  const btn = document.getElementById('btn-shutdown-selected');
+  btn.disabled = true;
+  try {
+    const outcomes = await Promise.allSettled(
+      targets.map(ag => api('POST', '/v1/commands', { target: ag.id, action: 'shutdown' }))
+    );
+    const failed = [];
+    outcomes.forEach((res, i) => {
+      if (res.status === 'rejected') failed.push(`${targets[i].hostname} (${res.reason.message})`);
+    });
+    const okCount = targets.length - failed.length;
+    let msg = `✓ Shutdown terkirim ke ${okCount} PC.`;
+    if (failed.length) msg += `\nGagal: ${failed.join(', ')}`;
+    alert(msg);
+  } finally {
+    updateAgentSelectionToolbar();
+  }
 }
 
 function buildDeviceProfile(ag) {
@@ -526,6 +608,7 @@ async function submitDeploy(mode) {
     const pkg    = document.getElementById('wg-pkg').value.trim();
     const action = document.querySelector('input[name="wg-action"]:checked').value;
     if (!pkg) { alert('Masukkan Package ID Winget.'); return; }
+    type = 'winget';
     payload = action === 'install'
       ? `winget install --id ${pkg} --silent --accept-source-agreements --accept-package-agreements`
       : `winget uninstall --id ${pkg} --silent`;
@@ -1322,6 +1405,13 @@ document.addEventListener('keydown', e => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 (async function init() {
+  // Feeds --header-h so .agents-menu-bar can stick right below the header
+  // bar instead of a hardcoded pixel guess.
+  const headerEl = document.querySelector('header');
+  if (headerEl) {
+    document.documentElement.style.setProperty('--header-h', headerEl.getBoundingClientRect().height + 'px');
+  }
+
   // support Enter key on login form
   ['login-user', 'login-pass'].forEach(id => {
     const el = document.getElementById(id);

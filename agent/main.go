@@ -189,6 +189,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	initPolicyCache()
+
 	serverURL := getServerURL()
 	serverBaseURL = strings.Replace(serverURL, "ws://", "http://", 1)
 	serverBaseURL = strings.Replace(serverBaseURL, "wss://", "https://", 1)
@@ -250,6 +252,8 @@ func logMsg(level, format string, args ...interface{}) {
 // ── Connection loop ────────────────────────────────────────────────────────
 
 func connectLoop(ctx context.Context, agentID, serverURL string) {
+	startPolicyFallbackTicker(ctx, agentID)
+
 	backoff := initialBackoff
 	attempt := 0
 
@@ -366,6 +370,7 @@ func runSession(ctx context.Context, conn *websocket.Conn, agentID string) error
 		return fmt.Errorf("initial metrics: %w", err)
 	}
 	replayPendingResults()
+	sendPolicyVersionCheck(agentID)
 
 	done := make(chan error, 1)
 	go func() {
@@ -437,6 +442,8 @@ func handleServerMessage(agentID string, data []byte) {
 	switch msgType {
 	case "exec":
 		go executeCommand(agentID, msg)
+	case "winget":
+		go executeCommand(agentID, msg)
 	case "file_deploy":
 		go deployFile(agentID, msg)
 	case "kill_process":
@@ -456,6 +463,8 @@ func handleServerMessage(agentID string, data []byte) {
 	case "network_mode":
 		mode, _ := msg["network_mode"].(string)
 		go reconcileNetworkMode(agentID, mode)
+	case "policy_update":
+		go handlePolicyUpdate(msg)
 	}
 }
 
