@@ -15,7 +15,7 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-// processStartEventTimeoutMs bounds how long each NextEvent_ call blocks
+// processStartEventTimeoutMs bounds how long each NextEvent call blocks
 // before returning control to the loop so ctx.Done() can be checked —
 // this is what makes the watcher's shutdown responsive without needing to
 // tear down the COM event subscription from another goroutine.
@@ -43,7 +43,7 @@ const (
 // backoff. Before this, a subscription-setup failure (e.g. the "Access
 // denied" this exact code hit when run without sufficient privilege) was
 // permanent for the agent process's entire lifetime — logged once as a WARN
-// and never retried, silently leaving the agent on the 30s metrics-tick
+// and never retried, silently leaving the agent on the 15s metrics-tick
 // fallback with no ongoing signal anything was wrong. This does not fix a
 // genuine, permanent privilege denial (that will just keep failing and
 // retrying forever, logging periodically) — only a transient failure or a
@@ -81,7 +81,7 @@ func startProcessStartWatch(ctx context.Context, agentID string) {
 // machine-wide, and evaluates each one against the local policy cache
 // (Priority 5 — enforceLocalPolicy) so a blocked app gets killed within
 // roughly a second of launch instead of waiting for the next sendInterval
-// metrics tick (up to 30s, see main.go). Returns true if the subscription
+// metrics tick (up to 15s, see main.go). Returns true if the subscription
 // was established (regardless of how the event loop below eventually ends —
 // ctx.Done() is the only path out of that loop once subscribed, so a false
 // return here specifically means setup itself failed) — startProcessStartWatch
@@ -148,7 +148,13 @@ func runProcessStartWatchOnce(ctx context.Context, agentID string) bool {
 		default:
 		}
 
-		eventRaw, err := oleutil.CallMethod(events, "NextEvent_", processStartEventTimeoutMs)
+		// NextEvent (not "NextEvent_" — SWbemEventSource's documented method
+		// name has no trailing underscore; the underscore version silently
+		// failed with "Unknown name" on every call, meaning this loop never
+		// received a single real event since this feature was first written
+		// — found by temporarily logging every NextEvent error verbatim
+		// during the investigation into why realtime enforcement never fired).
+		eventRaw, err := oleutil.CallMethod(events, "NextEvent", processStartEventTimeoutMs)
 		if err != nil {
 			// Timeout (WBEM_S_TIMEDOUT) or a transient error — either way,
 			// loop back and re-check ctx.Done() rather than treating this
@@ -173,7 +179,7 @@ func runProcessStartWatchOnce(ctx context.Context, agentID string) bool {
 // the cache Priority 4 keeps synced), killing inline when matched, instead
 // of only reporting to the server and waiting for it to decide. The server
 // is notified afterward, for audit/logging only (reportPolicyEnforcement) —
-// enforcement never waits on that round-trip. The 30s metrics tick
+// enforcement never waits on that round-trip. The 15s metrics tick
 // (server/policy.go's EvaluateProcesses, driven by handleMetrics) is
 // untouched and keeps running server-side as a telemetry/eventual-consistency
 // backstop, per spec.

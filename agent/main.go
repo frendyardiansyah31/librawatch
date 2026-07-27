@@ -21,7 +21,12 @@ import (
 )
 
 const (
-	sendInterval   = 30 * time.Second
+	// sendInterval also drives the server-side policy backstop sweep
+	// (server/policy.go's EvaluateProcesses, via handleMetrics) — the only
+	// thing that catches an already-running blocked process, since the
+	// realtime WMI path (agent/procwatch.go) only fires on new process
+	// launches, never on ones already running when a rule takes effect.
+	sendInterval   = 15 * time.Second
 	initialBackoff = 5 * time.Second
 	maxBackoff     = 60 * time.Second
 	agentOS        = "Windows 11 Home"
