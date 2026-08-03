@@ -89,6 +89,7 @@ func startEventWatchers(ctx context.Context, agentID string) {
 	go startConfigWatch(ctx, agentID)
 	go startInstallWatch(ctx, agentID)
 	go startProcessStartWatch(ctx, agentID)
+	go startUSBPopupWatch(ctx) // event-driven, local-only, doesn't report to server
 }
 
 func (p *agentProgram) Stop(_ service.Service) error {
@@ -162,6 +163,14 @@ func (w *rotWriter) rotate() {
 // ── Entry point ────────────────────────────────────────────────────────────
 
 func main() {
+	// Short-lived child mode: show the USB warning popup and exit. Checked
+	// before the service-control-verb branch below since "--usb-popup" is
+	// not a kardianos verb and service.Control would reject it.
+	if len(os.Args) > 1 && os.Args[1] == "--usb-popup" {
+		runUSBPopupChild()
+		return
+	}
+
 	// Handle service control commands first — no expensive setup needed.
 	if len(os.Args) > 1 {
 		prg := &agentProgram{}
