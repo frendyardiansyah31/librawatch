@@ -13,7 +13,8 @@ import (
 
 const (
 	popupTitle = "Access Denied / Akses Ditolak"
-	popupBody  = "External Storage Blocked\r\n\r\nPenyimpanan Eksternal Diblokir"
+	popupBody  = "External Storage Blocked\r\n\r\nPenyimpanan Eksternal Diblokir\r\n\r\n" +
+		"If you need assistance, please contact the library staff."
 
 	windowClassName = "LibraryAgentUSBPopup"
 
