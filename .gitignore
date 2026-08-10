@@ -15,6 +15,11 @@ library-server~
 # Generated runtime directories
 logs/
 uploads/
+
+# Veyon sync — credentials + generated CSV/log output
+veyon_sync_config.json
+veyon_export/
+__pycache__/
 ready-publish-plan.md
 DEPLOY.md
 ambil_file2.bat
@@ -24,3 +29,10 @@ plan-pending-command.md
 copy.ps1
 note.md
 index.html
+kirim_file.bat
+kirim_file.log
+update_server.bat
+veyon_sync_config.json
+veyon_sync_config.example.json
+veyon_sync.py
+SESSION_MEMORY.md
