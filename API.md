@@ -183,6 +183,44 @@ Deploy `type` yang didukung (divalidasi di `validateDeployRequest`, `server/api.
 |---|---|---|
 | GET | `/api/logs` | Tail `logs/server.log` (query `lines`, default 100, max 10000) |
 
+## API v1 (`/api/v1/*`) — untuk integrasi eksternal
+
+Prefix terpisah dari `/api/*` (Fase 1), didaftarkan sendiri di `server/main.go` tapi lewat
+middleware yang sama (`adminMiddleware` + `authMgr.Middleware()` — butuh session/token login
+yang sama dengan dashboard, bukan auth terpisah).
+
+### Computers (`server/computers.go`)
+| Method | Path | Fungsi |
+|---|---|---|
+| GET | `/api/v1/computers` | List komputer terkelola (read-only), untuk konsumer eksternal seperti Veyon sync worker |
+
+Query param opsional (bisa dikombinasikan, exact match, case-sensitive):
+- `floor` — filter berdasarkan lantai, mis. `?floor=Floor%204`
+- `hostname` — filter berdasarkan hostname, mis. `?hostname=PC-01`
+
+Diurutkan `hostname ASC`. Response **array JSON polos** (bukan `{success,data}` seperti
+`/api/v1/clients`), field per komputer: `hostname`, `ip_address`, `mac_address`, `floor` —
+semua dibaca langsung dari tabel `agents` yang sudah ada, tidak ada tabel baru.
+
+Contoh response (`200 OK`):
+```json
+[
+  {
+    "hostname": "PC-01",
+    "ip_address": "10.10.1.25",
+    "mac_address": "00:11:22:33:44:55",
+    "floor": "Floor 4"
+  }
+]
+```
+
+Kalau tidak ada komputer yang cocok dengan filter: `200 OK` dengan array kosong `[]` (bukan
+404 — kosong itu hasil valid, bukan error). Error DB internal → `500` dengan body
+`{"error": "<pesan>"}`, konsisten dengan endpoint lain di file ini. Tidak ada validasi `400`
+untuk `floor`/`hostname` karena keduanya kolom free-text di `agents` (sama seperti `PATCH
+/api/agents/:id`) — tidak ada enum untuk divalidasi, nilai apa pun yang tidak match cukup
+menghasilkan array kosong.
+
 ## MCP (Model Context Protocol) — untuk OpenClaw/bot, bukan dashboard
 
 | Method | Path | Fungsi |

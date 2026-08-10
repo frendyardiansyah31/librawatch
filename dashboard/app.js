@@ -190,14 +190,14 @@ async function loadAgents() {
   } catch (e) {
     console.error('loadAgents:', e);
     const tbody = document.getElementById('agents-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
   }
 }
 
 function renderAgents(agents) {
   const tbody = document.getElementById('agents-tbody');
   if (!agents.length) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty">Belum ada agent yang terhubung</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty">Belum ada agent yang terhubung</td></tr>';
     updateAgentSelectionToolbar();
     return;
   }
@@ -224,6 +224,11 @@ function renderAgents(agents) {
       <td><strong>${esc(ag.hostname)}</strong></td>
       <td style="font-family:monospace;font-size:12px">${esc(ag.ip)}</td>
       <td style="font-family:monospace;font-size:12px">${esc(ag.mac_address || '—')}</td>
+      <td>
+        <input type="text" class="device-group-input" value="${esc(ag.floor || '')}"
+          placeholder="—" onclick="event.stopPropagation()"
+          onchange="updateFloor('${esc(ag.id)}', this.value)">
+      </td>
       <td>
         <input type="text" class="device-group-input" value="${esc(ag.device_group || '')}"
           placeholder="—" onclick="event.stopPropagation()"
@@ -282,7 +287,7 @@ function makeDetailRow(id) {
   const tr = document.createElement('tr');
   tr.className = 'detail-row';
   tr.id = 'detail-' + id;
-  tr.innerHTML = `<td colspan="11"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
+  tr.innerHTML = `<td colspan="12"><div class="detail-content"><p class="no-data">Memuat…</p></div></td>`;
   return tr;
 }
 
@@ -463,6 +468,16 @@ async function updateDeviceGroup(agentID, group) {
     if (ag) ag.device_group = group;
   } catch (e) {
     alert('Gagal update device group: ' + e.message);
+  }
+}
+
+async function updateFloor(agentID, floor) {
+  try {
+    await api('PATCH', `/agents/${agentID}`, { floor: floor });
+    const ag = allAgents.find(a => a.id === agentID);
+    if (ag) ag.floor = floor;
+  } catch (e) {
+    alert('Gagal update floor: ' + e.message);
   }
 }
 

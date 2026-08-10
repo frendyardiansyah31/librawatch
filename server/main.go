@@ -306,6 +306,7 @@ func main() {
 
 	apiV1 := r.Group("/api/v1", adminMiddleware, authMgr.Middleware())
 	apiV1.GET("/clients", handleGetClients(db))
+	apiV1.GET("/computers", handleGetComputers(db))
 	RegisterCommandRoutes(apiV1, db, hub, deployer)
 
 	// /mcp exposes MCP tools (e.g. get_online_pcs) for machine clients like
