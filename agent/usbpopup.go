@@ -22,14 +22,18 @@ var usbPopupBusy atomic.Bool
 // (which reports usb_inserted/usb_removed to the server for the audit
 // trail) — this feature is local-only and never talks to the server.
 func startUSBPopupWatch(ctx context.Context) {
+	logMsg("DEBUG", "usbpopup: watcher started")
 	for ev := range usb.StartDetector(ctx, logMsg) {
 		handleUSBPopupEvent(ev)
 	}
+	logMsg("DEBUG", "usbpopup: watcher stopped")
 }
 
-func handleUSBPopupEvent(ev usb.DriveEvent) {
+func handleUSBPopupEvent(ev usb.Event) {
+	logMsg("DEBUG", "usbpopup: received event for %s", ev.DeviceID)
+
 	if !usbPopupBusy.CompareAndSwap(false, true) {
-		logMsg("INFO", "usbpopup: popup already showing, ignoring %s", ev.DriveLetter)
+		logMsg("INFO", "usbpopup: popup already showing, ignoring %s", ev.DeviceID)
 		return
 	}
 
@@ -63,6 +67,8 @@ func handleUSBPopupEvent(ev usb.DriveEvent) {
 	go func() {
 		if err := waiter.Wait(); err != nil {
 			logMsg("WARN", "usbpopup: popup process wait error: %v", err)
+		} else {
+			logMsg("DEBUG", "usbpopup: popup process exited cleanly")
 		}
 		usbPopupBusy.Store(false)
 	}()
@@ -74,5 +80,7 @@ func handleUSBPopupEvent(ev usb.DriveEvent) {
 // sessionlaunch, whose only job is to show the warning window and exit.
 func runUSBPopupChild() {
 	initLogger()
+	logMsg("DEBUG", "usbpopup: child process started")
 	ui.ShowWarning(logMsg)
+	logMsg("DEBUG", "usbpopup: child process exiting")
 }

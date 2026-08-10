@@ -12,10 +12,8 @@ import (
 )
 
 const (
-	popupTitle = "USB Flash Drive Detected"
-	popupBody  = "USB flash drives are not permitted on this computer.\r\n\r\n" +
-		"Please remove the flash drive.\r\n\r\n" +
-		"If you need assistance, please contact the library staff."
+	popupTitle = "Access Denied / Akses Ditolak"
+	popupBody  = "External Storage Blocked\r\n\r\nPenyimpanan Eksternal Diblokir"
 
 	windowClassName = "LibraryAgentUSBPopup"
 
