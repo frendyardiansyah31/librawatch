@@ -131,7 +131,7 @@ function barHtml(pct) {
 function alertLabel(type) {
   return { cpu_high:'CPU Tinggi', ram_high:'RAM Tinggi', offline:'Offline',
            recovery:'Online Kembali', blacklisted_app:'Aplikasi Terlarang',
-           peripheral_removed:'Perangkat Terlepas' }[type] || type;
+           peripheral_removed:'Perangkat Terlepas', deploy_failed:'Deploy Gagal' }[type] || type;
 }
 
 function agentName(id) {

@@ -567,6 +567,10 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 		"agent_id", msg.AgentID,
 		"status", msg.Status)
 
+	if msg.Status == "error" {
+		h.notifyDeployFailure(msg, output)
+	}
+
 	if err := h.db.UpdateJobStatus(msg.JobID); err != nil {
 		slog.Error("update job status failed", "job_id", msg.JobID, "error", err)
 	}
@@ -576,6 +580,42 @@ func (h *Hub) handleExecResult(msg *IncomingMessage) {
 	if h.deployer != nil {
 		go h.deployer.PumpAgent(msg.AgentID)
 	}
+}
+
+// notifyDeployFailure routes a failed deploy job (exec / winget / file_deploy
+// / deepfreeze / install_ssh) through the same alert pipeline already used
+// for offline/CPU/blacklisted-app events (Alerter.fire: DB row shown in the
+// Alerts tab, plus Telegram/email if configured) — so a failed deploy is
+// surfaced proactively instead of only being visible by opening the Deploy
+// tab and expanding the job card.
+func (h *Hub) notifyDeployFailure(msg *IncomingMessage, output string) {
+	if h.alerter == nil {
+		return
+	}
+
+	hostname := msg.AgentID
+	if ag, err := h.db.GetAgentByID(msg.AgentID); err == nil && ag != nil {
+		hostname = ag.Hostname
+	}
+
+	what := msg.Type
+	if job, err := h.db.GetDeployJobByID(msg.JobID); err == nil && job != nil {
+		what = job.Type + ": " + job.Payload
+	}
+
+	errText := output
+	if len(errText) > 300 {
+		errText = errText[:300] + "...[truncated]"
+	}
+
+	settings, err := h.db.GetAllSettings()
+	if err != nil {
+		slog.Error("notifyDeployFailure: get settings failed", "job_id", msg.JobID, "error", err)
+		return
+	}
+
+	message := fmt.Sprintf("⚠️ Deploy gagal di %s: %s\n%s", hostname, what, errText)
+	h.alerter.fire(msg.AgentID, "deploy_failed", message, settings)
 }
 
 func (h *Hub) handleLogResult(c *Client, msg *IncomingMessage) {

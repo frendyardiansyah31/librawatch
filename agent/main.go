@@ -187,6 +187,7 @@ func main() {
 	}
 
 	initLogger()
+	checkSelfUpdateCheckpoint()
 
 	var err error
 	hostname, err = os.Hostname()

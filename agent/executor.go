@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -76,7 +77,9 @@ func executeCommand(agentID string, msg map[string]interface{}) {
 
 	logMsg("INFO", "Executing command job=%s", jobID)
 
-	sendExecResult(agentID, jobID, attempt, runPSCommand(payload))
+	r := runPSCommand(payload)
+	logPSResult("Command", jobID, r)
+	sendExecResult(agentID, jobID, attempt, r)
 }
 
 func deployFile(agentID string, msg map[string]interface{}) {
@@ -90,6 +93,7 @@ func deployFile(agentID string, msg map[string]interface{}) {
 
 	localPath, err := downloadFile(filename, checksum)
 	if err != nil {
+		logMsg("ERROR", "File deploy job=%s filename=%s: download failed: %v", jobID, filename, err)
 		sendExecResult(agentID, jobID, attempt, psResult{
 			Status: "error", Output: "download failed: " + err.Error(), ExitCode: -1,
 		})
@@ -97,7 +101,9 @@ func deployFile(agentID string, msg map[string]interface{}) {
 	}
 	defer func() {
 		if err := os.Remove(localPath); err != nil {
-			logMsg("WARN", "Cleanup temp file failed: %s: %v", localPath, err)
+			logMsg("WARN", "File deploy job=%s: cleanup temp file failed: %s: %v", jobID, localPath, err)
+		} else {
+			logMsg("DEBUG", "File deploy job=%s: cleaned up %s", jobID, localPath)
 		}
 	}()
 
@@ -106,16 +112,44 @@ func deployFile(agentID string, msg map[string]interface{}) {
 	var psCmd string
 	if args != "" {
 		safeArgs := strings.ReplaceAll(args, "'", "''")
-		psCmd = fmt.Sprintf(
-			"$p = Start-Process -FilePath '%s' -ArgumentList '%s' -Wait -PassThru; $p.ExitCode",
-			safePath, safeArgs)
+		logMsg("INFO", "File deploy job=%s: executing %s (args: %s)", jobID, localPath, args)
+		// Call operator (&), not Start-Process: Start-Process launches the
+		// target as a separate detached process whose stdout/stderr is lost
+		// (never reaches this host's CombinedOutput) and, for .ps1 files,
+		// goes through Windows' shell file association — which defaults
+		// .ps1 to Notepad, not PowerShell, so it would never actually run.
+		// `&` invokes directly, inheriting this process's output and running
+		// .ps1 as an actual script.
+		psCmd = fmt.Sprintf("& '%s' %s; exit $LASTEXITCODE", safePath, safeArgs)
 	} else {
-		psCmd = fmt.Sprintf(
-			"$p = Start-Process -FilePath '%s' -Wait -PassThru; $p.ExitCode",
-			safePath)
+		logMsg("INFO", "File deploy job=%s: executing %s", jobID, localPath)
+		psCmd = fmt.Sprintf("& '%s'; exit $LASTEXITCODE", safePath)
 	}
 
-	sendExecResult(agentID, jobID, attempt, runPSCommand(psCmd))
+	// Written right before the risky part: if the deployed file kills this
+	// process (a self-update script stopping/killing agent.exe as part of
+	// replacing it — see selfupdate.go), the next startup's
+	// checkSelfUpdateCheckpoint infers the outcome instead of the job
+	// sitting stuck at "dispatched" forever. Cleared below once a real
+	// result exists, since the fallback is then unnecessary.
+	writeSelfUpdateCheckpoint(agentID, jobID, filename, attempt)
+
+	r := runPSCommand(psCmd)
+	clearSelfUpdateCheckpoint()
+	logPSResult(fmt.Sprintf("File deploy (%s)", filepath.Base(localPath)), jobID, r)
+	sendExecResult(agentID, jobID, attempt, r)
+}
+
+// logPSResult writes a single agent.log line summarizing a finished
+// runPSCommand invocation — success/failure, exit code, duration, and (on
+// failure) the actual output/error text — so agent.log alone is enough to
+// diagnose what happened without cross-referencing the dashboard.
+func logPSResult(label, jobID string, r psResult) {
+	if r.Status == "success" {
+		logMsg("INFO", "%s job=%s succeeded: exit_code=%d duration_ms=%d", label, jobID, r.ExitCode, r.DurationMS)
+		return
+	}
+	logMsg("ERROR", "%s job=%s failed: exit_code=%d duration_ms=%d error=%s", label, jobID, r.ExitCode, r.DurationMS, r.Output)
 }
 
 func sendExecResult(agentID, jobID string, attempt interface{}, r psResult) {

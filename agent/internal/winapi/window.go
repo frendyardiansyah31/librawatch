@@ -67,7 +67,7 @@ const (
 	swpNoSize     = 0x0001
 	swpShowWindow = 0x0040
 
-	flashwAll      = 0x00000003
+	flashwAll       = 0x00000003
 	flashwTimerNoFG = 0x0000000C
 
 	// MBIconExclamation is MB_ICONEXCLAMATION, reused as a MessageBeep sound ID.
