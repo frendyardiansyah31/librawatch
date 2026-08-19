@@ -62,6 +62,12 @@ type Config struct {
 		LeaseMinutes    int `yaml:"lease_minutes"`     // how long a dispatched command may run before it's requeued
 		DefaultMaxRetry int `yaml:"default_max_retry"` // retry budget for jobs that don't specify their own
 	} `yaml:"deploy"`
+
+	WoL struct {
+		Enabled  bool         `yaml:"enabled"`
+		Port     int          `yaml:"port"`     // WoL UDP destination port, standard is 9
+		Networks []WoLNetwork `yaml:"networks"` // named CIDR subnets; broadcast is always derived, never stored
+	} `yaml:"wol"`
 }
 
 const defaultConfigYAML = `server:
@@ -113,6 +119,11 @@ uploads:
 deploy:
   lease_minutes: 10      # how long a dispatched command may run before it's requeued
   default_max_retry: 3   # retry budget for jobs that don't specify their own
+
+wol:
+  enabled: true    # aktifkan Wake-on-LAN
+  port: 9
+  networks: []     # daftar network profile {name, subnet}, mis. {name: "library", subnet: "10.5.39.0/25"} — broadcast dihitung otomatis dari subnet, bisa juga diatur lewat dashboard Settings
 `
 
 func loadConfig(path string) (*Config, error) {
@@ -168,6 +179,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Deploy.DefaultMaxRetry == 0 {
 		cfg.Deploy.DefaultMaxRetry = 3
+	}
+	if cfg.WoL.Port == 0 {
+		cfg.WoL.Port = 9
 	}
 
 	return &cfg, nil

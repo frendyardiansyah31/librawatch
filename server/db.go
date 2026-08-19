@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -488,6 +489,36 @@ func (db *DB) migrate() error {
 		created_at         TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_policy_rules_enabled ON policy_rules(enabled);
+
+	-- software_inventory is the Software Inventory feature's current-state
+	-- table: one row per (agent_id, identity_key), fully reconciled on every
+	-- software_inventory_snapshot (see ReconcileSoftwareInventory) — upserted
+	-- if present in the snapshot, hard-deleted if absent. Deliberately
+	-- separate from applications/app_sightings (the execution-audit catalog,
+	-- Phase 1), which has different semantics (append-only sightings, no
+	-- "currently installed" concept). identity_key is computed via
+	-- shared.SoftwareIdentity.Key() — see server/software.go.
+	CREATE TABLE IF NOT EXISTS software_inventory (
+		agent_id                 TEXT NOT NULL REFERENCES agents(id),
+		identity_key             TEXT NOT NULL,
+		display_name             TEXT NOT NULL,
+		publisher                TEXT NOT NULL DEFAULT '',
+		display_version          TEXT NOT NULL DEFAULT '',
+		install_date              TEXT NOT NULL DEFAULT '',
+		windows_installer         INTEGER NOT NULL DEFAULT 0,
+		product_code              TEXT NOT NULL DEFAULT '',
+		uninstall_string          TEXT NOT NULL DEFAULT '',
+		quiet_uninstall_string    TEXT NOT NULL DEFAULT '',
+		hive                      TEXT NOT NULL DEFAULT '',
+		arch                      TEXT NOT NULL DEFAULT '',
+		scope                     TEXT NOT NULL DEFAULT '',
+		winget_id                 TEXT NOT NULL DEFAULT '',
+		winget_available_version  TEXT NOT NULL DEFAULT '',
+		first_seen                TEXT NOT NULL,
+		last_seen                 TEXT NOT NULL,
+		PRIMARY KEY (agent_id, identity_key)
+	);
+	CREATE INDEX IF NOT EXISTS idx_software_inventory_key ON software_inventory(identity_key);
 	`)
 	if err != nil {
 		return err
@@ -587,6 +618,9 @@ func (db *DB) DeleteAgent(id string) error {
 		`DELETE FROM processes     WHERE agent_id = ?`,
 		`DELETE FROM alerts        WHERE agent_id = ?`,
 		`DELETE FROM deploy_results WHERE agent_id = ?`,
+		`DELETE FROM app_sightings WHERE agent_id = ?`,
+		`DELETE FROM events        WHERE agent_id = ?`,
+		`DELETE FROM software_inventory WHERE agent_id = ?`,
 		`DELETE FROM agents        WHERE id = ?`,
 	} {
 		if _, err := tx.Exec(q, id); err != nil {
@@ -769,6 +803,18 @@ func (db *DB) GetAgentMacAddress(id string) (string, error) {
 		return "", nil
 	}
 	return mac, err
+}
+
+// GetAgentIP is a lightweight lookup (mirrors GetAgentMacAddress) used by
+// the wake Command API action to find which configured Wake-on-LAN network
+// a target agent belongs to.
+func (db *DB) GetAgentIP(id string) (string, error) {
+	var ip string
+	err := db.QueryRow(`SELECT ip FROM agents WHERE id = ?`, id).Scan(&ip)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return ip, err
 }
 
 // UpdateAgentNetworkModeResult records the agent's self-reported outcome of
@@ -1426,6 +1472,20 @@ func (db *DB) GetAllSettings() (map[string]string, error) {
 
 func (db *DB) InitDefaultSettings(cfg *Config) error {
 	blacklistJSON, _ := json.Marshal(cfg.Alerts.Blacklist)
+	wolNetworksJSON, _ := json.Marshal(cfg.WoL.Networks)
+
+	// One-time backward-compat note: wol_networks is a brand-new key. If a
+	// Phase 1 install already has a wol_broadcast_address but config.yaml's
+	// wol.networks is empty, that single-broadcast config can't be safely
+	// auto-converted (a broadcast address alone doesn't determine a unique
+	// subnet/prefix length) — warn instead of silently losing it or guessing.
+	if existingNetworks, _ := db.GetSetting("wol_networks"); existingNetworks == "" {
+		if legacyBroadcast, _ := db.GetSetting("wol_broadcast_address"); legacyBroadcast != "" && len(cfg.WoL.Networks) == 0 {
+			slog.Warn("WoL: legacy single broadcast_address setting found but no networks configured in config.yaml; "+
+				"Wake-on-LAN will not send packets until at least one network profile is added via config.yaml or dashboard Settings",
+				"legacy_broadcast_address", legacyBroadcast)
+		}
+	}
 
 	defaults := map[string]string{
 		"cpu_threshold":         fmt.Sprintf("%.0f", cfg.Alerts.CPUThreshold),
@@ -1444,6 +1504,9 @@ func (db *DB) InitDefaultSettings(cfg *Config) error {
 		"mesh_url":              cfg.MeshCentral.URL,
 		"lease_minutes":         fmt.Sprintf("%d", cfg.Deploy.LeaseMinutes),
 		"default_max_retry":     fmt.Sprintf("%d", cfg.Deploy.DefaultMaxRetry),
+		"wol_enabled":           strconv.FormatBool(cfg.WoL.Enabled),
+		"wol_port":              fmt.Sprintf("%d", cfg.WoL.Port),
+		"wol_networks":          string(wolNetworksJSON),
 	}
 
 	for k, v := range defaults {

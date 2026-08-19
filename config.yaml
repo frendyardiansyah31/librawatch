@@ -43,3 +43,10 @@ deepfreeze:
 uploads:
   path: "./uploads"
   max_size_mb: 500
+
+wol:
+  enabled: true
+  port: 9
+  networks:
+    - name: "library"
+      subnet: "10.5.39.0/25"   # broadcast dihitung otomatis = 10.5.39.127 — verified working via manual test

@@ -419,6 +419,14 @@ func createNetworkToggleCommand(db *DB, hub *Hub, action string, agentIDs []stri
 // target either received the packet or it didn't, and there's no way to
 // tell which from here.
 func createWakeCommand(db *DB, agentIDs []string, requestedBy string) (*DeployJob, error) {
+	wolCfg, err := getWoLConfig(db)
+	if err != nil {
+		return nil, &commandClientError{http.StatusBadRequest, "Invalid Wake-on-LAN configuration"}
+	}
+	if !wolCfg.Enabled {
+		return nil, &commandClientError{http.StatusBadRequest, "Wake-on-LAN is disabled"}
+	}
+
 	if len(agentIDs) == 1 {
 		mac, err := db.GetAgentMacAddress(agentIDs[0])
 		if err != nil {
@@ -426,6 +434,13 @@ func createWakeCommand(db *DB, agentIDs []string, requestedBy string) (*DeployJo
 		}
 		if mac == "" {
 			return nil, &commandClientError{http.StatusBadRequest, "agent has no known MAC address; cannot send Wake-on-LAN"}
+		}
+		ip, err := db.GetAgentIP(agentIDs[0])
+		if err != nil {
+			return nil, err
+		}
+		if _, err := resolveWoLBroadcast(wolCfg.Networks, ip); err != nil {
+			return nil, &commandClientError{http.StatusBadRequest, err.Error()}
 		}
 	}
 
@@ -454,12 +469,28 @@ func createWakeCommand(db *DB, agentIDs []string, requestedBy string) (*DeployJo
 			insertDeployResultRow(db, job.ID, agentID, "failed", "agent has no known MAC address")
 			continue
 		}
-		if err := sendMagicPacket(mac); err != nil {
+		ip, err := db.GetAgentIP(agentID)
+		if err != nil {
+			slog.Error("get ip address failed", "agent_id", agentID, "error", err)
+			insertDeployResultRow(db, job.ID, agentID, "failed", err.Error())
+			continue
+		}
+		// Broadcast is resolved per agent, not once for the whole job —
+		// different targets can be on different configured subnets.
+		broadcast, err := resolveWoLBroadcast(wolCfg.Networks, ip)
+		if err != nil {
+			insertDeployResultRow(db, job.ID, agentID, "failed", err.Error())
+			continue
+		}
+		slog.Info("wake-on-lan request", "agent_id", agentID, "mac", mac, "ip", ip,
+			"broadcast", broadcast, "port", wolCfg.Port)
+		if err := sendMagicPacket(mac, broadcast, wolCfg.Port); err != nil {
 			insertDeployResultRow(db, job.ID, agentID, "failed", err.Error())
 			continue
 		}
 		insertDeployResultRow(db, job.ID, agentID, "success",
-			"magic packet sent to "+mac+" (fire-and-forget — no delivery/wake confirmation is possible)")
+			fmt.Sprintf("magic packet sent to %s via %s:%d (fire-and-forget — no delivery/wake confirmation is possible)",
+				mac, broadcast, wolCfg.Port))
 	}
 
 	if err := db.UpdateDeployJobStatus(job.ID, "done"); err != nil {

@@ -61,6 +61,9 @@
       <button class="tab-btn" data-tab="applications" onclick="showTab('applications')">
         Applications
       </button>
+      <button class="tab-btn" data-tab="software" onclick="showTab('software')">
+        Software
+      </button>
       <button class="tab-btn" data-tab="events" onclick="showTab('events')">
         Events
       </button>
@@ -331,6 +334,56 @@
               </thead>
               <tbody id="applications-tbody">
                 <tr><td colspan="8" class="empty">Memuat data…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Software Inventory ─────────────────────────────────────────────── -->
+      <div id="tab-software" class="tab-content">
+        <div class="panel">
+          <div class="panel-hdr">
+            <input id="software-search" type="text" placeholder="Cari nama atau vendor…"
+              style="flex:1;max-width:280px" onkeyup="if(event.key==='Enter') applySoftwareSearch()" />
+            <button class="btn-sm" onclick="applySoftwareSearch()">Cari</button>
+          </div>
+          <div class="inner-tabs" id="software-filter-install-type">
+            <span style="align-self:center;font-size:12px;color:var(--muted);margin-right:4px">Install Type:</span>
+            <button class="inner-tab active" data-value="" onclick="setSoftwareFilter('installType','')">Semua</button>
+            <button class="inner-tab" data-value="msi" onclick="setSoftwareFilter('installType','msi')">MSI</button>
+            <button class="inner-tab" data-value="exe" onclick="setSoftwareFilter('installType','exe')">EXE</button>
+          </div>
+          <div class="inner-tabs" id="software-filter-update-status">
+            <span style="align-self:center;font-size:12px;color:var(--muted);margin-right:4px">Update Status:</span>
+            <button class="inner-tab active" data-value="" onclick="setSoftwareFilter('updateStatus','')">Semua</button>
+            <button class="inner-tab" data-value="up_to_date" onclick="setSoftwareFilter('updateStatus','up_to_date')">Terbaru</button>
+            <button class="inner-tab" data-value="update_available" onclick="setSoftwareFilter('updateStatus','update_available')">Ada Update</button>
+            <button class="inner-tab" data-value="unknown" onclick="setSoftwareFilter('updateStatus','unknown')">Tidak Diketahui</button>
+          </div>
+          <div class="inner-tabs" id="software-filter-platform">
+            <span style="align-self:center;font-size:12px;color:var(--muted);margin-right:4px">Platform:</span>
+            <button class="inner-tab active" data-value="" onclick="setSoftwareFilter('platform','')">Semua</button>
+            <button class="inner-tab" data-value="x64" onclick="setSoftwareFilter('platform','x64')">x64</button>
+            <button class="inner-tab" data-value="x86" onclick="setSoftwareFilter('platform','x86')">x86</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Vendor</th>
+                  <th>Version</th>
+                  <th>Newest Update</th>
+                  <th>Install Type</th>
+                  <th>Update Status</th>
+                  <th>Platform</th>
+                  <th>Endpoints</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="software-tbody">
+                <tr><td colspan="9" class="empty">Memuat data…</td></tr>
               </tbody>
             </table>
           </div>
@@ -652,6 +705,25 @@
               />
             </div>
           </section>
+
+          <section>
+            <h3>Wake-on-LAN</h3>
+            <div class="form-row-check">
+              <input id="s-wol-enabled" type="checkbox" />
+              <label for="s-wol-enabled">Enable Wake-on-LAN</label>
+            </div>
+            <div class="form-row">
+              <label>UDP Port</label>
+              <input id="s-wol-port" type="number" min="1" max="65535" placeholder="9" />
+            </div>
+            <div class="form-row">
+              <label>Networks</label>
+              <div id="wol-networks-list"></div>
+              <button type="button" class="btn-outline" onclick="addWolNetwork()" style="margin-top:4px">
+                + Add Network
+              </button>
+            </div>
+          </section>
         </div>
         <!-- modal-body -->
         <div class="modal-ftr">
@@ -682,6 +754,53 @@
           >
 Memuat…</pre
           >
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Software Endpoints Modal (drill-down) ─────────────────────────────── -->
+    <div id="modal-software-endpoints" class="modal-overlay" onclick="closeSoftwareEndpoints(event)">
+      <div class="modal modal-wide">
+        <div class="modal-hdr">
+          <h2 id="sw-endpoints-title">Endpoints</h2>
+          <button class="btn-close" onclick="closeSoftwareEndpoints()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>PC</th>
+                  <th>Version</th>
+                  <th>Platform</th>
+                  <th>Scope</th>
+                  <th>Update Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sw-endpoints-tbody">
+                <tr><td colspan="6" class="empty">Memuat data…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Software Uninstall Confirmation Modal ─────────────────────────────── -->
+    <div id="modal-software-uninstall-confirm" class="modal-overlay" onclick="closeSoftwareUninstallConfirm(event)">
+      <div class="modal">
+        <div class="modal-hdr">
+          <h2 id="sw-uninstall-title">Uninstall</h2>
+          <button class="btn-close" onclick="closeSoftwareUninstallConfirm()">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="margin-top:0">Software akan dihapus dari endpoint berikut:</p>
+          <ul id="sw-uninstall-target-list" style="max-height:260px;overflow-y:auto;margin:0;padding-left:20px"></ul>
+        </div>
+        <div class="modal-ftr">
+          <button class="btn-outline" style="border-color:#dc2626;color:#dc2626" onclick="executeUninstall()">Uninstall</button>
+          <button class="btn-ghost" onclick="closeSoftwareUninstallConfirm()">Batal</button>
         </div>
       </div>
     </div>

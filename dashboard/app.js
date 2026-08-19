@@ -11,6 +11,13 @@ let refreshTimer  = null;
 let meshBaseURL   = '';
 let allCategories = [];
 let appFilterStatus = 'pending_review';
+let allSoftware = [];
+let softwareSearch = '';
+let softwareFilterInstallType = '';
+let softwareFilterUpdateStatus = '';
+let softwareFilterPlatform = '';
+let swUninstallIdentityKey = '';
+let swUninstallTargets = [];
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 function getToken() { return localStorage.getItem('auth_token') || ''; }
@@ -164,6 +171,8 @@ function showTab(name) {
     loadLogs();
   } else if (name === 'applications') {
     loadApplications();
+  } else if (name === 'software') {
+    loadSoftware();
   } else if (name === 'events') {
     loadEvents();
     refreshTimer = setInterval(loadEvents, 15000);
@@ -857,6 +866,83 @@ function closeSettings(e) {
   document.getElementById('modal-settings').classList.remove('open');
 }
 
+// ── Wake-on-LAN network profiles (Settings > Wake-on-LAN) ───────────────────
+// Broadcast is always derived from the CIDR subnet, never entered directly —
+// mirrors server/wolpacket.go's parseWoLSubnet/cidrBroadcast so the dashboard
+// shows the same value the backend will actually use.
+let wolNetworksDraft = [];
+
+function ipv4ToInt(ip) {
+  const m = (ip || '').trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return null;
+  const o = m.slice(1).map(Number);
+  if (o.some(x => x > 255)) return null;
+  return ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
+}
+function intToIpv4(n) {
+  return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+}
+// wolSubnetInfo returns {network, broadcast, aligned} for a "a.b.c.d/nn"
+// string, or null if it isn't syntactically a valid IPv4 CIDR.
+function wolSubnetInfo(cidr) {
+  const m = (cidr || '').trim().match(/^(.+)\/(\d{1,2})$/);
+  if (!m) return null;
+  const ipInt = ipv4ToInt(m[1]);
+  const prefix = Number(m[2]);
+  if (ipInt === null || prefix < 0 || prefix > 32) return null;
+  const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+  const network = (ipInt & mask) >>> 0;
+  const broadcast = (network | (~mask >>> 0)) >>> 0;
+  return { network: intToIpv4(network), broadcast: intToIpv4(broadcast), aligned: network === ipInt };
+}
+
+function renderWolNetworks() {
+  const list = document.getElementById('wol-networks-list');
+  if (!list) return;
+  if (!wolNetworksDraft.length) {
+    list.innerHTML = '<div class="empty" style="padding:8px 0">Belum ada network — klik "+ Add Network".</div>';
+    return;
+  }
+  list.innerHTML = wolNetworksDraft.map((n, i) => {
+    const info = wolSubnetInfo(n.subnet);
+    let broadcastHtml;
+    if (!n.subnet) {
+      broadcastHtml = '—';
+    } else if (!info) {
+      broadcastHtml = '<span style="color:#dc2626">CIDR tidak valid</span>';
+    } else if (!info.aligned) {
+      broadcastHtml = `<span style="color:#dc2626">bukan network boundary — maksud Anda ${esc(info.network)}/${esc(n.subnet.split('/')[1] || '')}?</span>`;
+    } else {
+      broadcastHtml = `<strong>${esc(info.broadcast)}</strong> (calculated)`;
+    }
+    return `
+      <div class="wol-network-row">
+        <div class="form-row">
+          <label>Name</label>
+          <input type="text" value="${esc(n.name)}" placeholder="library"
+                 oninput="wolNetworksDraft[${i}].name = this.value" />
+        </div>
+        <div class="form-row">
+          <label>Subnet (CIDR)</label>
+          <input type="text" value="${esc(n.subnet)}" placeholder="10.5.39.0/25"
+                 oninput="wolNetworksDraft[${i}].subnet = this.value; renderWolNetworks()" />
+        </div>
+        <div class="wol-network-broadcast">Broadcast: ${broadcastHtml}</div>
+        <button type="button" class="btn-sm" onclick="removeWolNetwork(${i})">Remove</button>
+      </div>`;
+  }).join('');
+}
+
+function addWolNetwork() {
+  wolNetworksDraft.push({ name: '', subnet: '' });
+  renderWolNetworks();
+}
+
+function removeWolNetwork(i) {
+  wolNetworksDraft.splice(i, 1);
+  renderWolNetworks();
+}
+
 async function loadSettings() {
   try {
     const s = await api('GET', '/settings');
@@ -873,17 +959,42 @@ async function loadSettings() {
     document.getElementById('s-smtp-to').value   = s.smtp_to                || '';
     document.getElementById('s-mesh-url').value  = s.mesh_url               || '';
     document.getElementById('s-auto-kill').checked = s.auto_kill_enabled === 'true';
+    document.getElementById('s-wol-enabled').checked = s.wol_enabled !== 'false';
+    document.getElementById('s-wol-port').value      = s.wol_port              || '9';
     meshBaseURL = s.mesh_url || '';
     try {
       const bl = JSON.parse(s.blacklist || '[]');
       document.getElementById('s-blacklist').value = bl.join('\n');
     } catch (_) {}
+    try {
+      wolNetworksDraft = JSON.parse(s.wol_networks || '[]');
+    } catch (_) { wolNetworksDraft = []; }
+    renderWolNetworks();
   } catch (e) { console.error(e); }
 }
 
 async function saveSettings() {
   const blRaw = document.getElementById('s-blacklist').value.trim();
   const blacklist = blRaw ? blRaw.split('\n').map(s => s.trim()).filter(Boolean) : [];
+
+  const wolPort = document.getElementById('s-wol-port').value.trim();
+  const wolPortNum = Number(wolPort);
+  if (!Number.isInteger(wolPortNum) || wolPortNum < 1 || wolPortNum > 65535) {
+    alert('Wake-on-LAN UDP Port tidak valid — harus angka 1-65535');
+    return;
+  }
+
+  const wolNetworks = wolNetworksDraft.map(n => ({ name: (n.name || '').trim(), subnet: (n.subnet || '').trim() }));
+  for (const n of wolNetworks) {
+    if (!n.name) { alert('Wake-on-LAN: nama network tidak boleh kosong'); return; }
+    const info = wolSubnetInfo(n.subnet);
+    if (!info) { alert(`Wake-on-LAN: subnet "${n.subnet}" bukan CIDR IPv4 yang valid, contoh: 10.5.39.0/25`); return; }
+    if (!info.aligned) {
+      alert(`Wake-on-LAN: "${n.subnet}" bukan network boundary yang valid — maksud Anda ${info.network}/${n.subnet.split('/')[1]}?`);
+      return;
+    }
+  }
+
   try {
     await api('POST', '/settings', {
       cpu_threshold:         document.getElementById('s-cpu').value,
@@ -900,6 +1011,9 @@ async function saveSettings() {
       smtp_pass:             document.getElementById('s-smtp-pass').value,
       smtp_to:               document.getElementById('s-smtp-to').value,
       mesh_url:              document.getElementById('s-mesh-url').value,
+      wol_enabled:           document.getElementById('s-wol-enabled').checked,
+      wol_port:              wolPort,
+      wol_networks:          wolNetworks,
     });
     meshBaseURL = document.getElementById('s-mesh-url').value;
     alert('✓ Pengaturan berhasil disimpan.');
@@ -1015,6 +1129,186 @@ async function updateApplication(id, categoryValue, statusValue) {
   } catch (e) {
     alert('Gagal update aplikasi: ' + e.message);
     loadApplications();
+  }
+}
+
+// ── Software Tab ─────────────────────────────────────────────────────────────
+const UPDATE_STATUS_LABEL = { up_to_date: 'Terbaru', update_available: 'Ada Update', unknown: 'Tidak Diketahui' };
+const UPDATE_STATUS_BADGE = { up_to_date: 'badge-ok', update_available: 'badge-pending', unknown: 'badge-expired' };
+const INSTALL_TYPE_LABEL = { msi: 'MSI', exe: 'EXE', mixed: 'Campuran' };
+
+async function loadSoftware() {
+  const tbody = document.getElementById('software-tbody');
+  try {
+    const params = new URLSearchParams();
+    if (softwareSearch) params.set('search', softwareSearch);
+    if (softwareFilterInstallType) params.set('install_type', softwareFilterInstallType);
+    if (softwareFilterUpdateStatus) params.set('update_status', softwareFilterUpdateStatus);
+    if (softwareFilterPlatform) params.set('platform', softwareFilterPlatform);
+    const qs = params.toString() ? '?' + params.toString() : '';
+    allSoftware = await api('GET', '/v1/software' + qs) || [];
+    renderSoftware(allSoftware);
+  } catch (e) {
+    console.error('loadSoftware:', e);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function applySoftwareSearch() {
+  softwareSearch = document.getElementById('software-search').value.trim();
+  loadSoftware();
+}
+
+function setSoftwareFilter(kind, value) {
+  if (kind === 'installType') softwareFilterInstallType = value;
+  else if (kind === 'updateStatus') softwareFilterUpdateStatus = value;
+  else if (kind === 'platform') softwareFilterPlatform = value;
+
+  const groupId = kind === 'installType' ? 'software-filter-install-type'
+                : kind === 'updateStatus' ? 'software-filter-update-status'
+                : 'software-filter-platform';
+  document.querySelectorAll(`#${groupId} .inner-tab`).forEach(el => {
+    el.classList.toggle('active', el.dataset.value === value);
+  });
+  loadSoftware();
+}
+
+function renderSoftware(items) {
+  const tbody = document.getElementById('software-tbody');
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada software pada filter ini</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(sw => {
+    const statusBadge = UPDATE_STATUS_BADGE[sw.update_status] || 'badge-expired';
+    const statusLabel = UPDATE_STATUS_LABEL[sw.update_status] || sw.update_status || '—';
+    const installType = INSTALL_TYPE_LABEL[sw.install_type] || sw.install_type || '—';
+    const actionBtn = sw.any_uninstall_supported
+      ? `<button class="btn-sm" onclick="confirmUninstall('${esc(sw.identity_key)}')">Uninstall</button>`
+      : `<button class="btn-sm" disabled title="Tidak ada mekanisme uninstall yang aman untuk software ini pada satu pun endpoint">Uninstall</button>`;
+    return `
+    <tr data-identity-key="${esc(sw.identity_key)}">
+      <td><strong>${esc(sw.name)}</strong></td>
+      <td>${esc(sw.vendor || '—')}</td>
+      <td>${esc(sw.version || '—')}</td>
+      <td>${esc(sw.newest_update || '—')}</td>
+      <td>${esc(installType)}</td>
+      <td><span class="badge ${statusBadge}">${esc(statusLabel)}</span></td>
+      <td>${esc(sw.platform || '—')}</td>
+      <td><a href="#" onclick="openSoftwareEndpoints('${esc(sw.identity_key)}');return false">${sw.endpoint_count}</a></td>
+      <td>${actionBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Software Endpoints Drill-down ───────────────────────────────────────────
+async function openSoftwareEndpoints(identityKey) {
+  const sw = allSoftware.find(s => s.identity_key === identityKey);
+  document.getElementById('sw-endpoints-title').textContent = sw ? sw.name : 'Endpoints';
+  const tbody = document.getElementById('sw-endpoints-tbody');
+  tbody.innerHTML = '<tr><td colspan="6" class="empty">Memuat data…</td></tr>';
+  document.getElementById('modal-software-endpoints').classList.add('open');
+  try {
+    const rows = await api('GET', `/v1/software/${encodeURIComponent(identityKey)}/endpoints`) || [];
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">Tidak ada endpoint</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => {
+      const statusBadge = UPDATE_STATUS_BADGE[r.update_status] || 'badge-expired';
+      const statusLabel = UPDATE_STATUS_LABEL[r.update_status] || r.update_status || '—';
+      const actionBtn = r.uninstall_supported
+        ? `<button class="btn-sm" onclick="confirmUninstall('${esc(identityKey)}', ['${esc(r.agent_id)}'])">Uninstall</button>`
+        : `<button class="btn-sm" disabled title="${esc(r.uninstall_reason || 'Tidak didukung')}">Uninstall</button>`;
+      return `
+      <tr>
+        <td>${esc(r.hostname)}</td>
+        <td>${esc(r.display_version || '—')}</td>
+        <td>${esc(r.arch || '—')}</td>
+        <td>${esc(r.scope || '—')}</td>
+        <td><span class="badge ${statusBadge}">${esc(statusLabel)}</span></td>
+        <td>${actionBtn}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    console.error('openSoftwareEndpoints:', e);
+    tbody.innerHTML = `<tr><td colspan="6" class="empty" style="color:#dc2626">Gagal memuat data: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function closeSoftwareEndpoints(event) {
+  if (event && event.target.id !== 'modal-software-endpoints') return;
+  document.getElementById('modal-software-endpoints').classList.remove('open');
+}
+
+// ── Software Uninstall ──────────────────────────────────────────────────────
+// confirmUninstall(identityKey) from an aggregate row defaults the target
+// list to every endpoint currently reporting this software that supports
+// uninstall (fetched fresh, not from the possibly-stale aggregate row).
+// confirmUninstall(identityKey, agentIds) from the endpoint drill-down modal
+// targets exactly the one endpoint the admin clicked.
+function confirmUninstall(identityKey, agentIdsOverride) {
+  const sw = allSoftware.find(s => s.identity_key === identityKey);
+  const title = 'Uninstall ' + (sw ? sw.name : identityKey);
+
+  if (!agentIdsOverride) {
+    document.getElementById('sw-uninstall-title').textContent = title;
+    document.getElementById('sw-uninstall-target-list').innerHTML = '<li>Memuat daftar endpoint…</li>';
+    swUninstallIdentityKey = identityKey;
+    swUninstallTargets = [];
+    document.getElementById('modal-software-uninstall-confirm').classList.add('open');
+
+    api('GET', `/v1/software/${encodeURIComponent(identityKey)}/endpoints`).then(rows => {
+      const supported = (rows || []).filter(r => r.uninstall_supported);
+      swUninstallTargets = supported.map(r => r.agent_id);
+      const list = document.getElementById('sw-uninstall-target-list');
+      if (!supported.length) {
+        list.innerHTML = '<li>Tidak ada endpoint dengan mekanisme uninstall yang didukung</li>';
+        return;
+      }
+      list.innerHTML = supported.map(r => `<li>${esc(r.hostname)}</li>`).join('');
+    }).catch(e => {
+      document.getElementById('sw-uninstall-target-list').innerHTML =
+        `<li style="color:#dc2626">Gagal memuat endpoint: ${esc(e.message)}</li>`;
+    });
+    return;
+  }
+
+  swUninstallIdentityKey = identityKey;
+  swUninstallTargets = agentIdsOverride;
+  document.getElementById('sw-uninstall-title').textContent = title;
+  document.getElementById('sw-uninstall-target-list').innerHTML =
+    agentIdsOverride.map(id => `<li>${esc(agentName(id))}</li>`).join('');
+  document.getElementById('modal-software-uninstall-confirm').classList.add('open');
+}
+
+function closeSoftwareUninstallConfirm(event) {
+  if (event && event.target.id !== 'modal-software-uninstall-confirm') return;
+  document.getElementById('modal-software-uninstall-confirm').classList.remove('open');
+}
+
+async function executeUninstall() {
+  if (!swUninstallIdentityKey || !swUninstallTargets.length) {
+    alert('Tidak ada endpoint target.');
+    return;
+  }
+  try {
+    const result = await api('POST', '/v1/software/uninstall', {
+      identity_key: swUninstallIdentityKey,
+      agent_ids: swUninstallTargets,
+    });
+    closeSoftwareUninstallConfirm();
+    const jobCount = (result.jobs || []).length;
+    const skipCount = (result.skipped || []).length;
+    let msg = `${jobCount} job uninstall dikirim.`;
+    if (skipCount) {
+      msg += ` ${skipCount} endpoint dilewati (lihat console untuk detail).`;
+      console.warn('software uninstall skipped:', result.skipped);
+    }
+    alert(msg);
+    loadSoftware();
+  } catch (e) {
+    alert('Gagal uninstall: ' + e.message);
   }
 }
 

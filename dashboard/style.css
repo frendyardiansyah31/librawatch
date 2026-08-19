@@ -560,6 +560,14 @@ select.badge {
 .form-row-check input[type="checkbox"] { width: auto; }
 .form-row-check label { font-size: 13px; color: var(--text); font-weight: 400; cursor: pointer; }
 
+.wol-network-row {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px; margin-bottom: 8px;
+}
+.wol-network-row .form-row { margin-bottom: 8px; }
+.wol-network-row .wol-network-broadcast { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.wol-network-row .wol-network-broadcast strong { color: var(--text); font-weight: 600; }
+
 .modal-ftr {
   display: flex; gap: 8px; justify-content: flex-end;
   padding: 16px 20px; border-top: 1px solid var(--border);

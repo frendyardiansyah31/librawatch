@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"library-monitor/shared"
 )
 
 var allowedUploadExts = map[string]bool{
@@ -87,6 +89,31 @@ func validateDeployRequest(typ, payload, args string) error {
 
 	case "install_ssh":
 		// No user-controlled payload.
+
+	case "msiexec_uninstall":
+		// Software Inventory feature (Tier A) — payload must be nothing but
+		// a validated MSI ProductCode GUID; server/software.go's
+		// classifyUninstall is the only caller that ever creates this job
+		// type, always from a stored inventory row, never frontend input.
+		if _, ok := shared.NormalizeProductCode(payload); !ok {
+			return fmt.Errorf("invalid msiexec_uninstall payload: not a valid MSI product code")
+		}
+
+	case "quiet_uninstall":
+		// Software Inventory feature (Tier B) — payload must independently
+		// pass the same structural validation classifyUninstall used to
+		// offer this tier in the first place (defense in depth: this job
+		// type is only ever created server-side from a stored inventory
+		// row's QuietUninstallString, never frontend input). args carries
+		// the software's identity key, used by the agent for its own
+		// self-consistency check before executing — see
+		// agent/softwareinventory.go's executeQuietUninstall.
+		if _, _, ok := shared.ParseQuietUninstallCommand(payload); !ok {
+			return fmt.Errorf("invalid quiet_uninstall payload: command failed structural validation")
+		}
+		if args == "" {
+			return fmt.Errorf("quiet_uninstall requires args (software identity key)")
+		}
 
 	default:
 		return fmt.Errorf("unknown deploy type: %s", typ)
@@ -485,6 +512,40 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+
+		// wol_networks / wol_port are validated here (rather than only at
+		// send time in getWoLConfig) so a bad value is rejected immediately
+		// with a clear error instead of silently persisting and only
+		// surfacing as a failure on the next Wake attempt.
+		if v, ok := req["wol_networks"]; ok {
+			raw, err := json.Marshal(v)
+			var networks []WoLNetwork
+			if err == nil {
+				err = json.Unmarshal(raw, &networks)
+			}
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Wake-on-LAN networks payload"})
+				return
+			}
+			if err := validateWoLNetworks(networks); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		if v, ok := req["wol_port"]; ok {
+			var port int
+			switch tv := v.(type) {
+			case string:
+				port, _ = strconv.Atoi(strings.TrimSpace(tv))
+			case float64:
+				port = int(tv)
+			}
+			if err := validateWoLPort(port); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
+
 		for k, v := range req {
 			var val string
 			switch tv := v.(type) {
