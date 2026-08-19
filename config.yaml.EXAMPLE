@@ -1,0 +1,58 @@
+server:
+  port: 8080
+  host: "0.0.0.0"
+
+auth:
+  token: ""                      # token WebSocket untuk agent (kosong = nonaktif, semua agent bisa connect tanpa token)
+  admin_cidrs: []                # batasi akses dashboard/API ke IP tertentu, contoh: ["10.5.39.88/32"] (kosong = tidak dibatasi)
+  admin_username: "admin"        # WAJIB diganti — username login dashboard
+  admin_password: "CHANGE_ME"    # WAJIB diganti — password login dashboard, jangan pakai contoh ini apa adanya
+  mcp_token: ""                  # bearer token untuk endpoint /mcp (OpenClaw/bot AI) — generate sendiri, mis: openssl rand -hex 32; kosong = auth /mcp nonaktif
+
+database:
+  path: "./data/library.db"
+
+alerts:
+  cpu_threshold: 85
+  ram_threshold: 85
+  offline_after_minutes: 5
+  blacklist:
+    - "steam.exe"
+    - "epicgameslauncher.exe"
+    - "discord.exe"
+    - "battle.net.exe"
+    - "leagueoflegends.exe"
+
+telegram:
+  token: ""     # bot token dari @BotFather (kosong = notifikasi Telegram nonaktif)
+  chat_id: ""   # chat ID tujuan notifikasi
+
+email:
+  smtp_host: ""
+  smtp_port: 587
+  smtp_user: ""
+  smtp_pass: ""
+  smtp_to: ""
+
+meshcentral:
+  url: "http://192.168.1.10:4430"   # ganti ke URL MeshCentral yang sebenarnya, atau biarkan kalau tidak dipakai
+
+deepfreeze:
+  password: ""   # password admin Deep Freeze (DFC.exe) — WAJIB diisi kalau mau pakai fitur freeze/thaw, jangan commit nilai asli
+
+uploads:
+  path: "./uploads"
+  max_size_mb: 500
+
+wol:
+  enabled: true
+  port: 9
+  networks: []
+  # Isi networks dengan subnet PC yang mau di-Wake-on-LAN, satu entry per
+  # subnet. Broadcast dihitung otomatis dari CIDR, jangan diisi manual.
+  # Contoh:
+  # networks:
+  #   - name: "library"
+  #     subnet: "10.5.39.0/25"     # -> broadcast 10.5.39.127
+  #   - name: "office"
+  #     subnet: "172.16.4.0/22"    # -> broadcast 172.16.7.255

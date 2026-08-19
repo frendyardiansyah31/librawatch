@@ -66,13 +66,36 @@ Server dan agent adalah **dua modul Go terpisah**, masing-masing punya `go.mod` 
 
 ## Deploy — Server
 
+### Setup `config.yaml`
+
+`config.yaml` (root repo) menyimpan kredensial asli (password login dashboard, `mcp_token`, password Deep Freeze) — file ini **sengaja tidak ikut di-commit** (lihat `.gitignore`). Ada dua cara menyiapkannya:
+
+1. **Copy dari template** — cara yang direkomendasikan:
+
+   ```bash
+   copy config.yaml.EXAMPLE config.yaml
+   ```
+
+   lalu edit `config.yaml` dan isi minimal:
+   - `auth.admin_password` — ganti dari `CHANGE_ME`, ini password login dashboard.
+   - `auth.mcp_token` — generate token acak kalau mau pakai endpoint `/mcp` (mis. `openssl rand -hex 32`), kosongkan kalau tidak dipakai.
+   - `deepfreeze.password` — isi kalau PC target pakai Deep Freeze, kosongkan kalau tidak.
+   - `wol.networks` — isi subnet PC yang mau di-Wake-on-LAN (lihat contoh di dalam file); broadcast address dihitung otomatis dari CIDR, jangan diisi manual.
+   - Bagian lain (`telegram.*`, `email.*`, `meshcentral.url`, `alerts.*`) opsional, isi kalau fitur terkait mau dipakai.
+
+2. **Biarkan server generate otomatis** — kalau `config.yaml` belum ada saat pertama kali dijalankan, server otomatis membuatnya dengan nilai default aman (semua kredensial kosong) dan **tetap langsung jalan** dengan default itu (`admin_username`/`admin_password` kosong = login dashboard nonaktif, siapa saja bisa akses). Server cuma cetak pesan pengingat di log, tidak berhenti — jadi segera stop, isi `config.yaml` sesuai poin di atas, lalu restart.
+
+`server/config.yaml` (di dalam folder `server/`) adalah file leftover yang **tidak dipakai** — binary selalu baca `config.yaml` relatif ke lokasi `.exe`-nya sendiri (root repo kalau dijalankan dari sana).
+
+### Build & Jalankan
+
 Build dari root repo:
 
 ```bash
 go build -ldflags="-s -w" -o library-server.exe .\server\
 ```
 
-Jalankan pertama kali (foreground) untuk generate `config.yaml` default kalau belum ada, lalu edit sesuai kebutuhan (port, `auth.admin_username`/`admin_password`, `alerts.*`, `telegram.*`, `email.*`, `deepfreeze.password`, `wol.*`, dst):
+Jalankan (foreground, untuk dev/testing):
 
 ```bash
 .\library-server.exe
