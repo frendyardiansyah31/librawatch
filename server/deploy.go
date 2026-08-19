@@ -233,6 +233,10 @@ func (d *Deployer) dispatch(agentID string, job *DeployJob, attempt int) bool {
 	case "install_ssh":
 		msg.Action = "install_ssh"
 		msg.Args = job.Args // admin_ip passed via args
+		// "msiexec_uninstall" and "quiet_uninstall" (Software Inventory
+		// feature's uninstall tiers, server/software.go's classifyUninstall)
+		// intentionally have no case here — they need nothing beyond the
+		// default Payload/Args passthrough already set above.
 	}
 	sent := d.hub.SendToAgent(agentID, msg)
 	if sent {

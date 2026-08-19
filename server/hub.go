@@ -55,6 +55,10 @@ type IncomingMessage struct {
 	Metadata  map[string]interface{} `json:"metadata"`
 	// policy_version_check field (Priority 4 — agent's currently-cached policy version)
 	PolicyVersion int64 `json:"policy_version"`
+	// software_inventory_snapshot field — a full, non-diff report of one
+	// agent's currently installed software (see agent/softwareinventory.go);
+	// reconciled into the software_inventory table by handleSoftwareInventory.
+	SoftwareItems []SoftwareInventoryItem `json:"items,omitempty"`
 }
 
 // OutgoingMessage covers all server→agent message types.
@@ -285,7 +289,28 @@ func (h *Hub) handleMessage(c *Client, data []byte) {
 		h.handlePolicyVersionCheck(c, &msg)
 	case "policy_enforcement":
 		h.handlePolicyEnforcement(c, &msg)
+	case "software_inventory_snapshot":
+		h.handleSoftwareInventory(c, &msg)
 	}
+}
+
+// handleSoftwareInventory reconciles one agent's full software inventory
+// snapshot (Software Inventory feature) — a state sync, not an event, so
+// unlike handleEvent this never runs through the policy engine and has no
+// side effects beyond the software_inventory table itself.
+func (h *Hub) handleSoftwareInventory(c *Client, msg *IncomingMessage) {
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = msg.AgentID
+	}
+	if agentID == "" {
+		return
+	}
+	if err := h.db.ReconcileSoftwareInventory(agentID, msg.SoftwareItems); err != nil {
+		slog.Error("software inventory: reconcile failed", "agent_id", agentID, "error", err)
+		return
+	}
+	slog.Info("software inventory: snapshot reconciled", "agent_id", agentID, "items", len(msg.SoftwareItems))
 }
 
 // handlePolicyEnforcement records a policy decision the agent already

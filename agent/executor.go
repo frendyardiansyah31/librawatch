@@ -74,12 +74,22 @@ func executeCommand(agentID string, msg map[string]interface{}) {
 	jobID, _ := msg["job_id"].(string)
 	payload, _ := msg["payload"].(string)
 	attempt := msg["attempt"]
+	msgType, _ := msg["type"].(string)
 
 	logMsg("INFO", "Executing command job=%s", jobID)
 
 	r := runPSCommand(payload)
 	logPSResult("Command", jobID, r)
 	sendExecResult(agentID, jobID, attempt, r)
+
+	// Tier C (winget fallback) uninstall path for the Software Inventory
+	// feature: refresh inventory after a winget *uninstall* so the server's
+	// reconciliation — not this job's exit code alone — confirms the
+	// software is actually gone. Plain winget installs from the Deploy tab
+	// don't pay this extra scan cost.
+	if msgType == "winget" && strings.Contains(payload, "uninstall") {
+		triggerImmediateSnapshot(agentID)
+	}
 }
 
 func deployFile(agentID string, msg map[string]interface{}) {

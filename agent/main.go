@@ -88,6 +88,7 @@ func startEventWatchers(ctx context.Context, agentID string) {
 	go startDesktopWatch(ctx, agentID)
 	go startConfigWatch(ctx, agentID)
 	go startInstallWatch(ctx, agentID)
+	go startSoftwareInventoryLoop(ctx, agentID)
 	go startProcessStartWatch(ctx, agentID)
 	go startUSBPopupWatch(ctx) // event-driven, local-only, doesn't report to server
 }
@@ -459,6 +460,10 @@ func handleServerMessage(agentID string, data []byte) {
 		go executeCommand(agentID, msg)
 	case "winget":
 		go executeCommand(agentID, msg)
+	case "msiexec_uninstall":
+		go executeMsiexecUninstall(agentID, msg)
+	case "quiet_uninstall":
+		go executeQuietUninstall(agentID, msg)
 	case "file_deploy":
 		go deployFile(agentID, msg)
 	case "kill_process":

@@ -308,6 +308,7 @@ func main() {
 	apiV1.GET("/clients", handleGetClients(db))
 	apiV1.GET("/computers", handleGetComputers(db))
 	RegisterCommandRoutes(apiV1, db, hub, deployer)
+	RegisterSoftwareRoutes(apiV1, db, deployer)
 
 	// /mcp exposes MCP tools (e.g. get_online_pcs) for machine clients like
 	// OpenClaw. Protected by a static bearer token, same pattern as the
