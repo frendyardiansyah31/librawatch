@@ -66,6 +66,29 @@ Server dan agent adalah **dua modul Go terpisah**, masing-masing punya `go.mod` 
 
 ## Deploy — Server
 
+### Struktur Folder
+
+Server butuh berjalan dari sebuah folder (bukan cuma satu file exe) — minimal harus ada:
+
+```
+library-server/
+├── library-server.exe   ← hasil build (lihat langkah Build & Jalankan di bawah)
+├── config.yaml           ← wajib disiapkan sendiri, lihat "Setup config.yaml" di bawah
+└── dashboard/             ← wajib di-copy dari repo (index.html, app.js, style.css) — bukan di-generate otomatis
+```
+
+`dashboard/` **harus** ikut di-copy persis seperti isinya di repo ini — server serve UI dashboard langsung dari folder itu (`/` dan `/static/*`), kalau folder ini tidak ada, dashboard tidak bisa diakses (walau agent tetap bisa connect lewat `/ws`).
+
+Sub-folder berikut **dibuat otomatis** oleh server saat pertama kali jalan (tidak perlu disiapkan manual, tapi boleh tahu isinya):
+
+```
+data/       ← library.db (SQLite)
+logs/       ← server.log (auto-rotate)
+uploads/    ← file installer yang di-upload lewat panel Deploy
+```
+
+Kalau deploy pakai `.\library-server.exe install` sebagai Windows Service, service jalan dengan working directory di folder tempat exe ini berada (bukan `C:\Windows\System32`) — jadi pastikan seluruh isi folder di atas (exe + `config.yaml` + `dashboard/`) memang ditaruh bersebelahan di lokasi permanennya sebelum `install`, bukan di folder sementara.
+
 ### Setup `config.yaml`
 
 `config.yaml` (root repo) menyimpan kredensial asli (password login dashboard, `mcp_token`, password Deep Freeze) — file ini **sengaja tidak ikut di-commit** (lihat `.gitignore`). Ada dua cara menyiapkannya:
