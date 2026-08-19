@@ -4,7 +4,7 @@ Sistem monitoring & manajemen PC untuk perpustakaan atau lab komputer — memant
 
 ## Latar Belakang
 
-Perpustakaan UIII mengoperasikan puluhan PC publik yang sebelumnya dipantau/dikelola secara manual atau lewat kombinasi tool terpisah (Veyon untuk classroom control, cek fisik untuk software terpasang, dsb) dan membutuhkan koneksi via LAN/WLAN, sehingga tidak harus terhubung internet terlebih dahulu. LibraWatch dibangun untuk menyatukan kebutuhan itu ke satu sistem in-house:
+Perpustakaan atau lab komputer publik biasanya mengoperasikan puluhan PC yang sebelumnya dipantau/dikelola secara manual atau lewat kombinasi tool terpisah (Veyon untuk classroom control, cek fisik untuk software terpasang, dsb) dan membutuhkan koneksi via LAN/WLAN, sehingga tidak harus terhubung internet terlebih dahulu. LibraWatch dibangun untuk menyatukan kebutuhan itu ke satu sistem in-house:
 
 - **Visibilitas real-time** — tahu PC mana yang online, siapa yang login, proses apa yang berjalan, tanpa keliling fisik.
 - **Penegakan kebijakan otomatis** — blokir/catat aplikasi terlarang, pantau USB storage, deteksi perubahan konfigurasi (wallpaper, Run key, scheduled task) tanpa intervensi manual per PC.
