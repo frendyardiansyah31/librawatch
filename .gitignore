@@ -16,6 +16,13 @@ library-server~
 logs/
 uploads/
 
+# Server config — holds live credentials (admin password, mcp_token,
+# deepfreeze password). Never track; server auto-generates a safe default
+# (all secrets blank) on first run if the file is missing — see
+# server/config.go's defaultConfigYAML.
+config.yaml
+server/config.yaml
+
 # Veyon sync — credentials + generated CSV/log output
 veyon_sync_config.json
 veyon_export/
