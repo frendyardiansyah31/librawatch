@@ -583,114 +583,337 @@ select.badge {
   main   { padding: 12px; }
 }
 
-/* ── Floor Map ────────────────────────────────────────────────────────────── */
-.floor-summary {
-  display: flex;
-  gap: 32px;
-  padding: 14px 20px;
-  align-items: center;
+/* ── Floor Map (Layout Editor) ───────────────────────────────────────────────
+   Ported from the standalone prototype `index layout floor monitoring pc.html`
+   as literally as possible — same visual values/behavior, just namespaced
+   (lm- class prefix, fm- id prefix, --lm-* custom properties scoped under
+   #tab-floormap instead of :root) so nothing here can leak into or collide
+   with the rest of the dashboard's shared .btn/.modal/.stat/.dot/etc classes
+   or --green/--blue/--red/--gray variables. The prototype's own PC-detail
+   modal (.modal-head/.pcid/.status-chip/.row/.modal-close) is intentionally
+   not ported here — clicking a PC reuses the dashboard's existing
+   #modal-computer-detail instead (see app.js openComputerModal). ───────────── */
+#tab-floormap {
+  --lm-bg-0: #f4f6f9;
+  --lm-bg-1: #ffffff;
+  --lm-panel: #ffffff;
+  --lm-line: #dfe4ea;
+  --lm-line-soft: #eef1f5;
+  --lm-text-hi: #131b26;
+  --lm-text-lo: #64748b;
+  --lm-accent: #2f80ed;
+  --lm-accent-soft: rgba(47,128,237,.12);
+  --lm-green: #16a34a;   --lm-green-glow: rgba(22,163,74,.28);
+  --lm-blue: #2563eb;    --lm-blue-glow: rgba(37,99,235,.28);
+  --lm-gray: #94a3b8;    --lm-gray-glow: rgba(148,163,184,.22);
+  --lm-red: #dc2626;     --lm-red-glow: rgba(220,38,38,.3);
 }
 
-.floor-map-wrap {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r);
-  overflow-x: auto;
-  box-shadow: var(--sh);
+.lm-btn {
+  font-family: inherit; font-size: .82rem; font-weight: 600;
+  padding: 9px 16px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--lm-line); background: #eef1f5; color: var(--lm-text-hi);
+  transition: background .12s ease, border-color .12s ease, transform .1s ease;
 }
+.lm-btn:hover { background: #e2e8f0; }
+.lm-btn:active { transform: translateY(1px); }
+.lm-btn.lm-btn-primary { background: var(--lm-accent); border-color: var(--lm-accent); color: #ffffff; }
+.lm-btn.lm-btn-primary:hover { background: #529bff; }
+.lm-btn.lm-btn-primary.lm-active { background: var(--lm-red); border-color: var(--lm-red); color: #fff; }
+.lm-btn.lm-btn-ghost { background: transparent; }
+.lm-btn.lm-btn-danger { background: var(--lm-red); border-color: var(--lm-red); color: #fff; }
+.lm-btn.lm-btn-danger:hover { background: #e34c4c; }
 
-.floor-map-grid {
-  display: grid;
-  grid-template-columns: repeat(9, minmax(64px, 1fr));
-  grid-auto-rows: 72px;
-  gap: 10px;
-  padding: 20px;
-  background:
-    linear-gradient(#f8fafc, #f8fafc),
-    repeating-linear-gradient(0deg, transparent, transparent 71px, var(--border) 71px, var(--border) 72px);
+.lm-toolbar {
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 14px 20px; flex-wrap: wrap; gap: 12px;
 }
+.lm-controls { display: flex; gap: 10px; flex-wrap: wrap; }
 
-/* Room landmarks */
-.landmark {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  background: #eef2f7;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  text-align: center;
-  padding: 4px;
-  white-space: nowrap;
+.lm-legend {
+  display: flex; gap: 18px; padding: 10px 20px; flex-wrap: wrap;
+  font-size: .78rem; color: var(--lm-text-lo);
+}
+.lm-legend-item { display: flex; align-items: center; gap: 7px; }
+.lm-dot { width: 26px; height: auto; display: inline-block; color: var(--lm-gray); }
+.lm-dot svg { width: 100%; height: auto; display: block; }
+.lm-dot.lm-dot-online { color: var(--lm-green); filter: drop-shadow(0 0 3px var(--lm-green-glow)); }
+.lm-dot.lm-dot-idle { color: var(--lm-blue); filter: drop-shadow(0 0 3px var(--lm-blue-glow)); }
+.lm-dot.lm-dot-unused { color: var(--lm-gray); }
+.lm-dot.lm-dot-offline { color: var(--lm-red); filter: drop-shadow(0 0 3px var(--lm-red-glow)); }
+
+/* Small plain status dot for the sidebar "Nodes" palette rows (our own
+   addition, not part of the ported prototype) — kept as a compact dot so a
+   list of unplaced agents doesn't turn into a wall of large icons. */
+.lm-node-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.lm-node-dot.lm-dot-online { background: var(--lm-green); box-shadow: 0 0 6px var(--lm-green-glow); }
+.lm-node-dot.lm-dot-idle { background: var(--lm-blue); box-shadow: 0 0 6px var(--lm-blue-glow); }
+.lm-node-dot.lm-dot-unused { background: var(--lm-gray); }
+.lm-node-dot.lm-dot-offline { background: var(--lm-red); box-shadow: 0 0 6px var(--lm-red-glow); }
+
+/* Canvas tabs (multiple floor plans) */
+.lm-canvas-tabs {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 20px; border-bottom: 1px solid var(--lm-line);
+}
+.lm-tabs-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.lm-canvas-tab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px 7px 14px; border-radius: 8px;
+  border: 1px solid transparent; background: transparent;
+  font-size: .8rem; color: var(--lm-text-lo); cursor: pointer;
+  transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.lm-canvas-tab:hover { background: var(--lm-line-soft); color: var(--lm-text-hi); }
+.lm-canvas-tab.lm-active {
+  background: var(--lm-panel); border-color: var(--lm-line); color: var(--lm-text-hi); font-weight: 600;
+}
+.lm-canvas-tab .lm-tab-name { outline: none; border-radius: 4px; padding: 0 2px; }
+.lm-canvas-tab .lm-tab-name[contenteditable="true"] { background: #eef1f5; cursor: text; }
+.lm-tab-rename {
+  border: none; background: transparent; color: var(--lm-text-lo);
+  font-size: .72rem; line-height: 1; cursor: pointer; padding: 3px 5px; border-radius: 5px;
+}
+.lm-tab-rename:hover { background: var(--lm-line-soft); color: var(--lm-accent); }
+.lm-tab-close {
+  border: none; background: transparent; color: var(--lm-text-lo);
+  font-size: .95rem; line-height: 1; cursor: pointer; padding: 2px 5px; border-radius: 5px;
+}
+.lm-tab-close:hover { background: rgba(220,38,38,.15); color: var(--lm-red); }
+.lm-btn.lm-add-canvas { font-size: .78rem; padding: 7px 14px; white-space: nowrap; }
+
+/* Summary dashboard */
+.lm-summary {
+  display: flex; gap: 14px; padding: 16px 20px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--lm-line);
+}
+.lm-stat {
+  flex: 1 1 120px; min-width: 110px;
+  background: var(--lm-panel); border: 1px solid var(--lm-line); border-radius: 10px;
+  padding: 12px 14px;
+}
+.lm-stat .lm-num { font-size: 1.5rem; font-weight: 700; font-family: 'Consolas','SF Mono',monospace; }
+.lm-stat .lm-lbl { font-size: .72rem; color: var(--lm-text-lo); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+.lm-stat-online .lm-num { color: var(--lm-green); }
+.lm-stat-active .lm-num { color: var(--lm-green); }
+.lm-stat-idle .lm-num { color: var(--lm-blue); }
+.lm-stat-offline .lm-num { color: var(--lm-red); }
+
+/* Map / room container */
+.lm-stage { padding: 20px; display: flex; justify-content: center; align-items: flex-start; gap: 20px; }
+
+#fm-map {
+  position: relative;
+  width: 980px; max-width: 100%;
+  height: 620px;
+  background-color: var(--lm-panel);
+  background-image:
+    repeating-linear-gradient(0deg, rgba(15,23,32,.035) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(90deg, rgba(15,23,32,.035) 0 1px, transparent 1px 34px);
+  border: 2px solid var(--lm-line);
+  border-radius: 12px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  user-select: none;
+}
+#fm-map.lm-edit-mode {
+  border-color: var(--lm-accent);
+  box-shadow: 0 0 0 3px var(--lm-accent-soft);
+  /* Two-tier alignment grid: a fine 34px grid plus a bolder accent-colored
+     line every 5th cell (170px), so nodes are easy to eyeball into rows
+     and columns while dragging. Only shown while editing. */
+  background-image:
+    repeating-linear-gradient(0deg, rgba(47,128,237,.16) 0 1.5px, transparent 1.5px 170px),
+    repeating-linear-gradient(90deg, rgba(47,128,237,.16) 0 1.5px, transparent 1.5px 170px),
+    repeating-linear-gradient(0deg, rgba(15,23,32,.09) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(90deg, rgba(15,23,32,.09) 0 1px, transparent 1px 34px);
+}
+#fm-map.lm-edit-mode::before {
+  content: "EDIT MODE — drag objects to reposition";
+  position: absolute; top: 8px; left: 12px;
+  font-size: .68rem; color: var(--lm-accent); letter-spacing: .05em;
+  font-family: 'Consolas','SF Mono',monospace;
+  pointer-events: none; z-index: 5;
 }
 
-.landmark-walkway {
-  background: repeating-linear-gradient(45deg, #f1f5f9, #f1f5f9 10px, #e2e8f0 10px, #e2e8f0 20px);
-  border: none;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: .1em;
-  color: var(--muted);
-  writing-mode: vertical-rl;
+/* Map objects (generic) */
+.lm-map-object {
+  position: absolute;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border-radius: 10px;
+  transition: box-shadow .12s ease, transform .12s ease, border-color .12s ease;
 }
 
-/* Computer card */
-.pc-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r);
-  box-shadow: var(--sh);
-  cursor: pointer;
-  border-top: 3px solid var(--border);
-  transition: transform .15s, box-shadow .15s, border-color .15s;
+.lm-map-object.lm-deco {
+  width: 70px; height: 70px;
+  border: 1px dashed var(--lm-line);
+  background: rgba(15,23,32,.025);
+  color: var(--lm-text-lo);
+  font-size: .62rem; letter-spacing: .03em; text-transform: uppercase; gap: 4px;
 }
-.pc-card:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 8px 20px rgba(0,0,0,.14);
-  border-color: var(--blue);
+.lm-map-object.lm-deco .lm-ico { font-size: 1.4rem; }
+.lm-map-object.lm-deco.lm-type-window {
+  border: none; border-top: 3px solid #2c4a63;
+  background: repeating-linear-gradient(90deg, rgba(47,128,237,.10) 0 12px, rgba(47,128,237,.03) 12px 24px);
+  color: #2f6fa8;
 }
-.pc-card .pc-name { font-size: 12px; font-weight: 700; }
-.pc-card .pc-dot   { width: 10px; height: 10px; border-radius: 50%; }
 
-.pc-card.status-online_active { border-top-color: var(--green); }
-.pc-card.status-online_active .pc-dot { background: var(--green); box-shadow: 0 0 0 3px #dcfce7; }
-
-.pc-card.status-online_idle { border-top-color: var(--blue); }
-.pc-card.status-online_idle .pc-dot { background: var(--blue); box-shadow: 0 0 0 3px #dbeafe; }
-
-.pc-card.status-online_unused { border-top-color: var(--gray); }
-.pc-card.status-online_unused .pc-dot { background: var(--gray); box-shadow: 0 0 0 3px #e5e7eb; }
-
-.pc-card.status-offline { border-top-color: var(--red); }
-.pc-card.status-offline .pc-dot { background: var(--red); box-shadow: 0 0 0 3px #fee2e2; }
-
-.pc-card.status-unknown { border-top-color: var(--orange); }
-.pc-card.status-unknown .pc-dot { background: var(--orange); box-shadow: 0 0 0 3px #fef3c7; }
-
-/* Legend */
-.floor-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  margin-top: 14px;
-  padding: 12px 20px;
-  font-size: 12px;
-  color: var(--muted);
+/* PC card */
+.lm-map-object.lm-pc {
+  width: 74px; height: 74px;
+  background: linear-gradient(160deg, #ffffff, #f2f5f9);
+  border: 1px solid var(--lm-line);
+  box-shadow: 0 4px 10px rgba(15,23,32,.10);
+  gap: 5px; cursor: pointer;
 }
-.legend-item { display: flex; align-items: center; gap: 6px; }
-.legend-dot  { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-.legend-green  { background: var(--green); }
-.legend-blue   { background: var(--blue); }
-.legend-gray   { background: var(--gray); }
-.legend-red    { background: var(--red); }
-.legend-orange { background: var(--orange); }
+.lm-map-object.lm-pc:hover {
+  border-color: #94a3b8;
+  box-shadow: 0 8px 16px rgba(15,23,32,.16);
+  transform: translateY(-2px);
+}
+.lm-map-object.lm-pc .lm-id {
+  font-family: 'Consolas','SF Mono',monospace; font-size: .62rem;
+  color: var(--lm-text-hi); font-weight: 600;
+  max-width: 66px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lm-map-object.lm-pc .lm-light { width: 48px; height: auto; display: block; color: var(--lm-gray); transition: transform .18s ease; }
+.lm-map-object.lm-pc .lm-light svg { width: 100%; height: auto; display: block; }
+.lm-map-object.lm-pc.lm-status-online .lm-light { color: var(--lm-green); filter: drop-shadow(0 0 4px var(--lm-green-glow)); }
+.lm-map-object.lm-pc.lm-status-idle .lm-light { color: var(--lm-blue); filter: drop-shadow(0 0 4px var(--lm-blue-glow)); }
+.lm-map-object.lm-pc.lm-status-unused .lm-light { color: var(--lm-gray); }
+.lm-map-object.lm-pc.lm-status-offline .lm-light { color: var(--lm-red); filter: drop-shadow(0 0 4px var(--lm-red-glow)); }
+
+/* facing — rotates just the screen icon to point where the PC faces */
+.lm-map-object.lm-pc.lm-facing-up .lm-light { transform: rotate(0deg); }
+.lm-map-object.lm-pc.lm-facing-right .lm-light { transform: rotate(90deg); }
+.lm-map-object.lm-pc.lm-facing-down .lm-light { transform: rotate(180deg); }
+.lm-map-object.lm-pc.lm-facing-left .lm-light { transform: rotate(270deg); }
+
+/* facing arrows — shown on hover of the PC card, click to set direction */
+.lm-facing-controls {
+  position: absolute; inset: 0; pointer-events: none;
+  opacity: 0; transition: opacity .12s ease;
+}
+.lm-map-object.lm-pc:hover .lm-facing-controls { opacity: 1; }
+.lm-facing-arrow {
+  position: absolute; width: 20px; height: 20px; padding: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: #ffffff; border: 1px solid var(--lm-line); color: var(--lm-text-lo);
+  font-size: .6rem; line-height: 1; cursor: pointer; pointer-events: auto;
+  box-shadow: 0 2px 6px rgba(15,23,32,.18);
+  transition: background .12s ease, color .12s ease, border-color .12s ease, transform .1s ease;
+}
+.lm-facing-arrow:hover { background: var(--lm-accent); border-color: var(--lm-accent); color: #fff; transform: scale(1.12); }
+.lm-facing-arrow-up { top: -10px; left: 50%; margin-left: -10px; }
+.lm-facing-arrow-down { bottom: -10px; left: 50%; margin-left: -10px; }
+.lm-facing-arrow-left { left: -10px; top: 50%; margin-top: -10px; }
+.lm-facing-arrow-right { right: -10px; top: 50%; margin-top: -10px; }
+.lm-map-object.lm-pc.lm-status-offline { animation: lm-pulse-red 2.2s infinite; }
+@keyframes lm-pulse-red { 0%,100% { border-color: var(--lm-line); } 50% { border-color: var(--lm-red); } }
+
+/* edit-mode affordances */
+#fm-map.lm-edit-mode .lm-map-object { cursor: grab; }
+#fm-map.lm-edit-mode .lm-map-object:hover { border-color: var(--lm-accent); }
+.lm-map-object.lm-dragging {
+  cursor: grabbing !important;
+  z-index: 100;
+  box-shadow: 0 14px 28px rgba(15,23,32,.22);
+  transform: scale(1.04);
+  transition: none;
+}
+
+/* delete ("×") badge — only interactive/visible while editing */
+.lm-map-object .lm-obj-delete {
+  display: none;
+  position: absolute; top: -8px; right: -8px; z-index: 10;
+  width: 20px; height: 20px; border-radius: 50%;
+  align-items: center; justify-content: center;
+  background: #ffffff; border: 1px solid var(--lm-line); color: var(--lm-text-lo);
+  font-size: .85rem; line-height: 1; padding: 0; cursor: pointer;
+  transition: background .12s ease, color .12s ease, border-color .12s ease, transform .1s ease;
+}
+#fm-map.lm-edit-mode .lm-map-object .lm-obj-delete { display: flex; }
+.lm-map-object .lm-obj-delete:hover {
+  background: var(--lm-red); border-color: var(--lm-red); color: #fff; transform: scale(1.1);
+}
+
+/* Sidebar — object palette (drag onto the map to add new objects) */
+.lm-sidebar {
+  width: 210px; flex: 0 0 210px; align-self: flex-start;
+  background: var(--lm-panel); border: 1px solid var(--lm-line); border-radius: 12px;
+  padding: 16px;
+}
+.lm-sidebar-head h2 { margin: 0 0 4px; font-size: .82rem; font-weight: 700; }
+.lm-sidebar-head p { margin: 0 0 16px; font-size: .72rem; color: var(--lm-text-lo); line-height: 1.4; }
+.lm-sidebar.lm-disabled .lm-sidebar-head p { color: var(--lm-accent); }
+
+.lm-palette-group { margin-bottom: 16px; }
+.lm-palette-group:last-child { margin-bottom: 0; }
+.lm-palette-group .lm-group-lbl {
+  margin: 0 0 8px; font-size: .68rem; color: var(--lm-text-lo);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.lm-palette-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; margin-bottom: 7px;
+  background: #f8fafc; border: 1px solid var(--lm-line); border-radius: 8px;
+  cursor: grab; touch-action: none;
+  transition: border-color .12s ease, background .12s ease, transform .1s ease;
+}
+.lm-palette-item .lm-ico { font-size: 1.1rem; width: 20px; text-align: center; flex-shrink: 0; }
+.lm-palette-item .lm-lbl { font-size: .78rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lm-sidebar:not(.lm-disabled) .lm-palette-item:hover {
+  border-color: var(--lm-accent); background: #eaf2fe; transform: translateX(2px);
+}
+.lm-sidebar.lm-disabled .lm-palette-item { opacity: .4; cursor: not-allowed; pointer-events: none; }
+.lm-palette-item.lm-dragging-source { opacity: .35; }
+.lm-palette-empty { font-size: .72rem; color: var(--lm-text-lo); font-style: italic; padding: 4px 2px 10px; }
+
+.lm-drag-ghost {
+  position: fixed; z-index: 500; pointer-events: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px; border-radius: 8px;
+  background: #ffffff; border: 1px solid var(--lm-accent);
+  box-shadow: 0 10px 24px rgba(15,23,32,.18);
+  font-size: .78rem; font-weight: 600; color: var(--lm-text-hi);
+  transform: translate(-50%,-50%);
+}
+
+#fm-map.lm-drop-ready { border-color: var(--lm-green); box-shadow: 0 0 0 3px var(--lm-green-glow); }
+
+@media (max-width: 760px) {
+  .lm-stage { flex-direction: column; align-items: stretch; }
+  .lm-sidebar { width: 100%; flex: none; }
+}
+@media (max-width: 1040px) {
+  #fm-map { transform-origin: top left; }
+}
+
+/* Generic confirm dialog + toast (shared modal shell, scoped to Floor Map) */
+.lm-overlay {
+  position: fixed; inset: 0; background: rgba(4,7,11,.65); backdrop-filter: blur(3px);
+  display: none; align-items: center; justify-content: center; z-index: 200;
+}
+.lm-overlay.lm-show { display: flex; }
+.lm-modal {
+  width: 320px;
+  background: linear-gradient(165deg, #ffffff, #f5f7fa);
+  border: 1px solid var(--lm-line); border-radius: 14px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 20px 50px rgba(15,23,32,.22);
+  animation: lm-pop .14s ease;
+}
+@keyframes lm-pop { from { transform: scale(.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.lm-confirm-modal { width: 280px; }
+.lm-confirm-msg { margin: 0 0 18px; font-size: .86rem; line-height: 1.5; color: var(--lm-text-hi); }
+.lm-confirm-actions { display: flex; gap: 10px; }
+.lm-confirm-actions .lm-btn { flex: 1; }
+
+.lm-toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: #f0fdf4; border: 1px solid rgba(22,163,74,.35); color: #15803d;
+  padding: 10px 18px; border-radius: 8px; font-size: .82rem; font-weight: 600;
+  box-shadow: 0 10px 24px rgba(15,23,32,.18);
+  opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease;
+  z-index: 300;
+}
+.lm-toast.lm-show { opacity: 1; transform: translateX(-50%) translateY(-4px); }

@@ -53,7 +53,7 @@ Alert types: `cpu_high`, `ram_high` (threshold + 3x consecutive check), `blackli
 ### Settings
 | Method | Path | Fungsi |
 |---|---|---|
-| GET | `/api/settings` | Ambil semua setting (threshold CPU/RAM, Telegram, Email, dll) |
+| GET | `/api/settings` | Ambil semua setting (threshold CPU/RAM, Telegram, Email, blacklist, wol_networks, floor_map_layout, dll) |
 | POST | `/api/settings` | Update setting (key-value, langsung berlaku tanpa restart) |
 
 ### Applications (Application Catalog — Phase 1)

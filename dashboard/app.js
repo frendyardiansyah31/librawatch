@@ -1366,9 +1366,23 @@ function renderEvents(events) {
   }).join('');
 }
 
-// ── Floor Map Tab ─────────────────────────────────────────────────────────
+// ── Floor Map Tab (Layout Editor) ─────────────────────────────────────────
+// Ported from the standalone prototype `index layout floor monitoring pc.html`
+// as literally as possible (same drag-and-drop mechanics, multi-canvas/floor
+// tabs, decorative object palette, edit mode, toast, generic confirm dialog).
+// Only two things are adapted from the prototype:
+//   1. The sidebar "Nodes" palette is populated from real registered agents
+//      (allAgents, from GET /api/agents) instead of a generic dummy "PC"
+//      template — see lmRenderPalette()/lmUnplacedAgents().
+//   2. Clicking a placed PC reuses the dashboard's existing
+//      openComputerModal()/#modal-computer-detail below (unchanged) instead
+//      of the prototype's own dummy-telemetry modal.
+// Layout (agent placements per floor) is persisted via the existing generic
+// settings mechanism (GET/POST /api/settings, key "floor_map_layout"), the
+// same pattern already used for wol_networks/blacklist — see lmSaveLayout()/
+// lmLoadLayout().
+
 let computers = [];
-let computerElements = new Map();
 let currentComputerId = null;
 
 const STATUS_META = {
@@ -1392,145 +1406,26 @@ function deriveStatus(agent) {
   return 'ONLINE_UNUSED';
 }
 
-// Data source today: the real /api/agents list, reshaped into the floor-map
-// computer schema. Swappable later for a dedicated /api/computers endpoint
-// or WebSocket feed without touching the renderer below.
+// Reshapes the real /api/agents list into the shape the computer-detail
+// modal expects. Grid x/y placement is no longer computed here — real
+// positions now come from the saved/dragged layout (see lmLayout below).
 function mapAgentsToComputers(agents) {
   const sorted = [...agents].sort((a, b) => (a.hostname || '').localeCompare(b.hostname || ''));
-  return sorted.map((ag, i) => {
-    const row = Math.floor(i / 8);
-    const posInRow = i % 8;
-    const x = posInRow < 4 ? 1 + posInRow : 6 + (posInRow - 4);
-    const y = 2 + row;
-    return {
-      id: ag.id,
-      name: ag.hostname || ('PC-' + String(i + 1).padStart(2, '0')),
-      status: deriveStatus(ag),
-      x, y,
-      hostname: ag.hostname,
-      ip: ag.ip,
-      cpu: ag.cpu,
-      ram: ag.ram,
-      session: null,
-      idle: null,
-      lastSeen: ag.last_seen,
-      agentVersion: ag.agent_version,
-      os: ag.windows_version || ag.os,
-      connection: CONNECTION_LABELS[ag.current_network_mode] || '—',
-    };
-  });
-}
-
-function buildLandmarks(rowCount) {
-  const footerY = rowCount + 2;
-  return [
-    { type: 'entrance',  label: '🚪 Entrance',   x: 1, y: 1 },
-    { type: 'window',    label: '🪟 Window',     x: 3, y: 1, colSpan: 5 },
-    { type: 'stair',     label: '🪜 Stair',      x: 9, y: 1 },
-    { type: 'walkway',   label: 'Walkway',       x: 5, y: 2, rowSpan: rowCount },
-    { type: 'helpdesk',  label: '🛎 Help Desk',  x: 2, y: footerY },
-    { type: 'printer',   label: '🖨 Printer',    x: 5, y: footerY },
-    { type: 'bookshelf', label: '📚 Bookshelf',  x: 8, y: footerY },
-  ];
-}
-
-function makeLandmarkEl(lm) {
-  const div = document.createElement('div');
-  div.className = 'landmark' + (lm.type === 'walkway' ? ' landmark-walkway' : '');
-  div.textContent = lm.label;
-  div.style.gridColumn = lm.colSpan ? `${lm.x} / span ${lm.colSpan}` : String(lm.x);
-  div.style.gridRow = lm.rowSpan ? `${lm.y} / span ${lm.rowSpan}` : String(lm.y);
-  return div;
-}
-
-function makeComputerCard(c) {
-  const div = document.createElement('div');
-  div.className = 'pc-card status-' + c.status.toLowerCase();
-  div.style.gridColumn = String(c.x);
-  div.style.gridRow = String(c.y);
-  div.title = `${c.hostname || c.name} — ${(STATUS_META[c.status] || {}).label || c.status}`;
-  div.innerHTML = `<span class="pc-dot"></span><span class="pc-name">${esc(c.name)}</span>`;
-  div.addEventListener('click', () => openComputerModal(c.id));
-  return div;
-}
-
-// Full rebuild — only called on first load or when the set of agents
-// (added/removed) actually changes. Routine refreshes go through
-// updateComputer() instead so 100+ cards don't get re-created every poll.
-function renderFloorMap() {
-  const grid = document.getElementById('floor-map-grid');
-  if (!grid) return;
-  grid.innerHTML = '';
-  computerElements.clear();
-
-  if (!computers.length) {
-    grid.style.gridTemplateRows = '';
-    grid.innerHTML = '<p class="empty">Belum ada agent yang terhubung</p>';
-    return;
-  }
-
-  const rowCount = Math.max(...computers.map(c => c.y)) - 1;
-  grid.style.gridTemplateRows = `repeat(${rowCount + 2}, 72px)`;
-
-  const frag = document.createDocumentFragment();
-  buildLandmarks(rowCount).forEach(lm => frag.appendChild(makeLandmarkEl(lm)));
-  computers.forEach(c => {
-    const card = makeComputerCard(c);
-    computerElements.set(c.id, card);
-    frag.appendChild(card);
-  });
-  grid.appendChild(frag);
-}
-
-// Hook point for future real-time updates (WebSocket push etc.) — patches
-// one card in place without touching the rest of the grid.
-function updateComputer(id, patch) {
-  const c = computers.find(x => x.id === id);
-  if (!c) return;
-  Object.assign(c, patch);
-  const el = computerElements.get(id);
-  if (!el) return;
-  el.className = 'pc-card status-' + c.status.toLowerCase();
-  el.title = `${c.hostname || c.name} — ${(STATUS_META[c.status] || {}).label || c.status}`;
-}
-
-function updateSummary() {
-  const total   = computers.length;
-  const offline = computers.filter(c => c.status === 'OFFLINE').length;
-  const active  = computers.filter(c => c.status === 'ONLINE_ACTIVE').length;
-  const idle    = computers.filter(c => c.status === 'ONLINE_IDLE').length;
-  const unused  = computers.filter(c => c.status === 'ONLINE_UNUSED').length;
-  document.getElementById('floor-stat-total').textContent   = total;
-  document.getElementById('floor-stat-online').textContent  = total - offline;
-  document.getElementById('floor-stat-offline').textContent = offline;
-  document.getElementById('floor-stat-active').textContent  = active;
-  document.getElementById('floor-stat-idle').textContent    = idle;
-  document.getElementById('floor-stat-unused').textContent  = unused;
-}
-
-function diffAndRenderFloorMap(newComputers) {
-  const prevIds = new Set(computers.map(c => c.id));
-  const sameSet = prevIds.size === newComputers.length && newComputers.every(c => prevIds.has(c.id));
-
-  computers = newComputers;
-
-  if (sameSet && computerElements.size) {
-    computers.forEach(c => updateComputer(c.id, c));
-  } else {
-    renderFloorMap();
-  }
-}
-
-async function loadFloorMap() {
-  try {
-    await loadAgents();
-    diffAndRenderFloorMap(mapAgentsToComputers(allAgents));
-    updateSummary();
-  } catch (e) {
-    console.error('loadFloorMap:', e);
-    const grid = document.getElementById('floor-map-grid');
-    if (grid) grid.innerHTML = `<p class="empty" style="color:#dc2626">Gagal memuat denah: ${esc(e.message)}</p>`;
-  }
+  return sorted.map(ag => ({
+    id: ag.id,
+    name: ag.hostname || ag.id,
+    status: deriveStatus(ag),
+    hostname: ag.hostname,
+    ip: ag.ip,
+    cpu: ag.cpu,
+    ram: ag.ram,
+    session: null,
+    idle: null,
+    lastSeen: ag.last_seen,
+    agentVersion: ag.agent_version,
+    os: ag.windows_version || ag.os,
+    connection: CONNECTION_LABELS[ag.current_network_mode] || '—',
+  }));
 }
 
 function openComputerModal(id) {
@@ -1580,6 +1475,601 @@ function restartComputer() {
 
 function shutdownComputer() {
   sendComputerCommand('shutdown', 'shutdown');
+}
+
+// ── Layout editor state (ported from the prototype's OBJECT_TYPES/canvases) ──
+const LM_OBJECT_TYPES = {
+  pc:        { icon: '🖥️', label: 'PC',              decorative: false },
+  door:      { icon: '🚪', label: 'Entrance',         decorative: true  },
+  stair:     { icon: '🪜', label: 'Stair',            decorative: true  },
+  window:    { icon: '🪟', label: 'Window',           decorative: true  },
+  printer:   { icon: '🖨️', label: 'Printer',          decorative: true  },
+  bookshelf: { icon: '📚', label: 'Bookshelf',        decorative: true  },
+  reception: { icon: '🛎️', label: 'Reception Desk',   decorative: true  },
+  exit:      { icon: '🚨', label: 'Emergency Exit',   decorative: true  },
+};
+const LM_PALETTE_DECOR_TYPES = ['door', 'window', 'stair', 'printer', 'bookshelf', 'reception', 'exit'];
+
+function lmDeepClone(x) { return JSON.parse(JSON.stringify(x)); }
+
+let lmCanvasIdCounter = 0;
+function lmMakeCanvas(name, layout) {
+  lmCanvasIdCounter += 1;
+  return { id: 'canvas-' + lmCanvasIdCounter, name, layout: layout || [] };
+}
+
+let lmCanvases = [ lmMakeCanvas('Ground Floor', []) ];
+let lmActiveCanvasIndex = 0;
+let lmLayout = lmCanvases[0].layout; // alias, always points at the active canvas's layout
+let lmEditMode = false;
+let lmDragState = null;      // { id, el, moved, offsetX, offsetY }
+let lmSavedSnapshot = null;  // last successfully saved/loaded canvases, used by Reset
+let lmLoaded = false;        // guards lmLoadLayout() from re-fetching every tab open
+let lmConfirmResolve = null;
+
+const fmMapEl         = document.getElementById('fm-map');
+const fmSummaryEl     = document.getElementById('fm-summary');
+const fmBtnEdit       = document.getElementById('fm-btn-edit');
+const fmBtnSave       = document.getElementById('fm-btn-save');
+const fmBtnReset      = document.getElementById('fm-btn-reset');
+const fmSidebarEl     = document.getElementById('fm-sidebar');
+const fmSidebarHintEl = document.getElementById('fm-sidebar-hint');
+const fmPaletteListEl = document.getElementById('fm-palette-list');
+const fmTabsListEl    = document.getElementById('fm-tabs-list');
+const fmBtnAddCanvas  = document.getElementById('fm-btn-add-canvas');
+const fmToastEl       = document.getElementById('fm-toast');
+const fmConfirmOverlay   = document.getElementById('fm-confirm-overlay');
+const fmConfirmMsgEl     = document.getElementById('fm-confirm-msg');
+const fmConfirmOkBtn     = document.getElementById('fm-confirm-ok');
+const fmConfirmCancelBtn = document.getElementById('fm-confirm-cancel');
+
+// ── Cross-canvas PC uniqueness: an agent placed on any floor disappears
+//    from the sidebar of every canvas until it's removed from the map. ──────
+function lmPlacedAgentIds() {
+  const set = new Set();
+  lmCanvases.forEach(c => c.layout.forEach(o => { if (o.type === 'pc') set.add(o.refId); }));
+  return set;
+}
+function lmUnplacedAgents() {
+  const placed = lmPlacedAgentIds();
+  return allAgents.filter(a => !placed.has(a.id));
+}
+
+// deriveStatus() can return UNKNOWN (agent online, no cpu sample yet), which
+// has no slot in the layout editor's 4-state dot vocabulary. Bucketed into
+// 'unused' since the agent is still online, just without an activity signal.
+function lmStatusFromAgent(agent) {
+  const s = deriveStatus(agent);
+  if (s === 'ONLINE_ACTIVE') return 'online';
+  if (s === 'ONLINE_IDLE')   return 'idle';
+  if (s === 'OFFLINE')       return 'offline';
+  return 'unused'; // ONLINE_UNUSED or UNKNOWN
+}
+
+// Generates the next free id for a decorative type, e.g. door-2, printer-3.
+function lmGenerateId(type) {
+  const nums = lmLayout
+    .filter(o => o.type === type)
+    .map(o => parseInt(String(o.id).replace(/^\D+-?/, ''), 10))
+    .filter(n => !isNaN(n));
+  const next = (nums.length ? Math.max(...nums) : 0) + 1;
+  return type + '-' + next;
+}
+
+function lmRemoveObject(id) {
+  const idx = lmLayout.findIndex(o => o.id === id);
+  if (idx === -1) return;
+  const obj = lmLayout[idx];
+  const label = obj.type === 'pc' ? 'PC' : ((LM_OBJECT_TYPES[obj.type] || {}).label || obj.type);
+  lmLayout.splice(idx, 1);
+  lmRenderMap();
+  lmRenderSummary();
+  lmRenderPalette();
+  lmShowToast(`${label} dihapus dari denah`);
+}
+
+// ── Render — map objects (data-driven, same as the prototype) ──────────────
+function lmBuildObjectEl(obj) {
+  const el = document.createElement('div');
+  el.className = 'lm-map-object';
+  el.dataset.id = obj.id;
+  el.style.left = obj.x + 'px';
+  el.style.top  = obj.y + 'px';
+  if (obj.w) el.style.width  = obj.w + 'px';
+  if (obj.h) el.style.height = obj.h + 'px';
+
+  if (obj.type === 'pc') {
+    const agent = allAgents.find(a => a.id === obj.refId);
+    const status = agent ? lmStatusFromAgent(agent) : 'offline';
+    const facing = obj.facing || 'up';
+    el.classList.add('lm-pc', 'lm-status-' + status, 'lm-facing-' + facing);
+    const label = agent ? esc(agent.hostname || agent.id) : '⚠ removed';
+    el.title = agent ? agent.hostname : `Agent ${obj.refId} sudah tidak terdaftar`;
+    el.innerHTML = `<span class="lm-id">${label}</span><span class="lm-light"><svg viewBox="0 0 677 369"><use href="#fm-pc-icon"></use></svg></span>
+      <div class="lm-facing-controls">
+        <button type="button" class="lm-facing-arrow lm-facing-arrow-up" data-dir="up" title="Hadap atas" aria-label="Hadap atas">▲</button>
+        <button type="button" class="lm-facing-arrow lm-facing-arrow-right" data-dir="right" title="Hadap kanan" aria-label="Hadap kanan">▶</button>
+        <button type="button" class="lm-facing-arrow lm-facing-arrow-down" data-dir="down" title="Hadap bawah" aria-label="Hadap bawah">▼</button>
+        <button type="button" class="lm-facing-arrow lm-facing-arrow-left" data-dir="left" title="Hadap kiri" aria-label="Hadap kiri">◀</button>
+      </div>`;
+    el.addEventListener('click', () => {
+      // A click that happens right after a drag shouldn't open the modal.
+      if (lmDragState && lmDragState.moved) return;
+      if (!lmEditMode && agent) openComputerModal(obj.refId);
+    });
+
+    // Facing arrows — appear on hover (CSS), rotate the icon to point the
+    // way it was clicked. stopPropagation on pointerdown/click so this
+    // never starts a drag or opens the detail modal underneath it. Facing
+    // is local state (like x/y) until "Save Layout" is clicked, and works
+    // whether edit mode is on or off — same as the prototype.
+    el.querySelectorAll('.lm-facing-arrow').forEach(btn => {
+      btn.addEventListener('pointerdown', e => e.stopPropagation());
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const dir = btn.dataset.dir;
+        obj.facing = dir;
+        el.classList.remove('lm-facing-up', 'lm-facing-down', 'lm-facing-left', 'lm-facing-right');
+        el.classList.add('lm-facing-' + dir);
+      });
+    });
+  } else {
+    const meta = LM_OBJECT_TYPES[obj.type] || { icon: '❓', label: obj.type };
+    el.classList.add('lm-deco', 'lm-type-' + obj.type);
+    el.innerHTML = `<span class="lm-ico">${meta.icon}</span><span>${esc(meta.label)}</span>`;
+  }
+
+  // Delete badge — hidden by CSS outside edit mode.
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'lm-obj-delete';
+  delBtn.title = 'Hapus';
+  delBtn.setAttribute('aria-label', 'Hapus');
+  delBtn.textContent = '×';
+  delBtn.addEventListener('pointerdown', e => e.stopPropagation());
+  delBtn.addEventListener('click', e => { e.stopPropagation(); lmRemoveObject(obj.id); });
+  el.appendChild(delBtn);
+
+  lmAttachDragHandlers(el, obj);
+  return el;
+}
+
+function lmRenderMap() {
+  fmMapEl.innerHTML = '';
+  lmLayout.forEach(obj => fmMapEl.appendChild(lmBuildObjectEl(obj)));
+}
+
+// ── Summary dashboard — counts derived live from lmLayout + allAgents ──────
+function lmRenderSummary() {
+  const pcs = lmLayout.filter(o => o.type === 'pc');
+  const counts = { online: 0, idle: 0, unused: 0, offline: 0 };
+  pcs.forEach(o => {
+    const agent = allAgents.find(a => a.id === o.refId);
+    const status = agent ? lmStatusFromAgent(agent) : 'offline';
+    counts[status] = (counts[status] || 0) + 1;
+  });
+  const onlineTotal = counts.online + counts.idle + counts.unused;
+
+  const stats = [
+    { cls: '',        num: pcs.length,     lbl: 'Total PC' },
+    { cls: 'online',  num: onlineTotal,    lbl: 'Online' },
+    { cls: 'active',  num: counts.online,  lbl: 'Aktif' },
+    { cls: 'idle',    num: counts.idle,    lbl: 'Idle' },
+    { cls: 'offline', num: counts.offline, lbl: 'Offline' },
+  ];
+
+  fmSummaryEl.innerHTML = stats.map(s => `
+    <div class="lm-stat${s.cls ? ' lm-stat-' + s.cls : ''}">
+      <div class="lm-num">${s.num}</div>
+      <div class="lm-lbl">${s.lbl}</div>
+    </div>
+  `).join('');
+}
+
+// ── Canvases (multiple floor plans: switch, add, rename, delete) ───────────
+function lmSwitchCanvas(index) {
+  if (index === lmActiveCanvasIndex || index < 0 || index >= lmCanvases.length) return;
+  lmActiveCanvasIndex = index;
+  lmLayout = lmCanvases[lmActiveCanvasIndex].layout;
+  lmRenderMap();
+  lmRenderSummary();
+  lmRenderPalette();
+  lmRenderCanvasTabs();
+}
+
+function lmAddCanvas() {
+  const canvas = lmMakeCanvas(`Lantai ${lmCanvases.length + 1}`, []);
+  lmCanvases.push(canvas);
+  lmActiveCanvasIndex = lmCanvases.length - 1;
+  lmLayout = canvas.layout;
+  lmRenderMap();
+  lmRenderSummary();
+  lmRenderPalette();
+  lmRenderCanvasTabs();
+  lmShowToast(`"${canvas.name}" dibuat — geser objek dari sidebar untuk mulai`);
+}
+
+function lmDeleteCanvas(index) {
+  if (lmCanvases.length <= 1) return; // always keep at least one canvas
+  const removed = lmCanvases[index];
+  lmCanvases.splice(index, 1);
+  if (lmActiveCanvasIndex >= lmCanvases.length) lmActiveCanvasIndex = lmCanvases.length - 1;
+  else if (index < lmActiveCanvasIndex) lmActiveCanvasIndex -= 1;
+  lmLayout = lmCanvases[lmActiveCanvasIndex].layout;
+  lmRenderMap();
+  lmRenderSummary();
+  lmRenderPalette();
+  lmRenderCanvasTabs();
+  lmShowToast(`"${removed.name}" dihapus`);
+}
+
+function lmRenameCanvas(index, name) {
+  const clean = name.trim();
+  lmCanvases[index].name = clean || lmCanvases[index].name;
+}
+
+function lmRenderCanvasTabs() {
+  fmTabsListEl.innerHTML = lmCanvases.map((c, i) => `
+    <div class="lm-canvas-tab ${i === lmActiveCanvasIndex ? 'lm-active' : ''}" data-index="${i}">
+      <span class="lm-tab-name" data-index="${i}">${esc(c.name)}</span>
+      <button class="lm-tab-rename" data-index="${i}" title="Ganti nama canvas" aria-label="Ganti nama canvas">✎</button>
+      ${lmCanvases.length > 1 ? `<button class="lm-tab-close" data-index="${i}" title="Hapus canvas" aria-label="Hapus canvas">×</button>` : ''}
+    </div>
+  `).join('');
+
+  fmTabsListEl.querySelectorAll('.lm-canvas-tab').forEach(tabEl => {
+    const idx = parseInt(tabEl.dataset.index, 10);
+    tabEl.addEventListener('click', (e) => {
+      if (e.target.closest('.lm-tab-close') || e.target.closest('.lm-tab-rename')) return;
+      if (e.target.classList.contains('lm-tab-name') && e.target.isContentEditable) return;
+      lmSwitchCanvas(idx);
+    });
+  });
+
+  function startRenaming(nameEl) {
+    nameEl.contentEditable = 'true';
+    nameEl.focus();
+    document.execCommand('selectAll', false, null);
+  }
+
+  fmTabsListEl.querySelectorAll('.lm-tab-name').forEach(nameEl => {
+    const idx = parseInt(nameEl.dataset.index, 10);
+    nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRenaming(nameEl); });
+    nameEl.addEventListener('blur', () => {
+      nameEl.contentEditable = 'false';
+      lmRenameCanvas(idx, nameEl.textContent);
+      nameEl.textContent = lmCanvases[idx].name;
+    });
+    nameEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
+      if (e.key === 'Escape') { nameEl.textContent = lmCanvases[idx].name; nameEl.blur(); }
+    });
+  });
+
+  fmTabsListEl.querySelectorAll('.lm-tab-rename').forEach(btn => {
+    const idx = parseInt(btn.dataset.index, 10);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (idx !== lmActiveCanvasIndex) lmSwitchCanvas(idx);
+      const nameEl = fmTabsListEl.querySelector(`.lm-tab-name[data-index="${idx}"]`);
+      if (nameEl) startRenaming(nameEl);
+    });
+  });
+
+  fmTabsListEl.querySelectorAll('.lm-tab-close').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.index, 10);
+      const ok = await lmAskConfirm(`Hapus "${lmCanvases[idx].name}"? Tindakan ini tidak bisa dibatalkan.`);
+      if (ok) lmDeleteCanvas(idx);
+    });
+  });
+}
+
+// ── Drag & drop (manual, Pointer Events — no library). Only active in edit
+//    mode: repositioning placed objects (lmAttachDragHandlers) and dragging
+//    new items in from the sidebar palette (lmAttachPaletteDragHandlers). ──
+function lmAttachDragHandlers(el, obj) {
+  el.addEventListener('pointerdown', (e) => {
+    if (!lmEditMode) return;
+    e.preventDefault();
+
+    const mapRect = fmMapEl.getBoundingClientRect();
+    lmDragState = {
+      id: obj.id,
+      el,
+      moved: false,
+      offsetX: e.clientX - mapRect.left - obj.x,
+      offsetY: e.clientY - mapRect.top  - obj.y,
+    };
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('lm-dragging');
+  });
+
+  el.addEventListener('pointermove', (e) => {
+    if (!lmDragState || lmDragState.id !== obj.id) return;
+    lmDragState.moved = true;
+
+    const mapRect = fmMapEl.getBoundingClientRect();
+    let newX = e.clientX - mapRect.left - lmDragState.offsetX;
+    let newY = e.clientY - mapRect.top  - lmDragState.offsetY;
+
+    const elW = el.offsetWidth, elH = el.offsetHeight;
+    newX = Math.max(0, Math.min(newX, fmMapEl.clientWidth  - elW));
+    newY = Math.max(0, Math.min(newY, fmMapEl.clientHeight - elH));
+
+    obj.x = Math.round(newX);
+    obj.y = Math.round(newY);
+    el.style.left = obj.x + 'px';
+    el.style.top  = obj.y + 'px';
+  });
+
+  const endDrag = (e) => {
+    if (!lmDragState || lmDragState.id !== obj.id) return;
+    el.classList.remove('lm-dragging');
+    try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+    setTimeout(() => { lmDragState = null; }, 0);
+  };
+  el.addEventListener('pointerup', endDrag);
+  el.addEventListener('pointercancel', endDrag);
+}
+
+function lmAddAgentAt(agentId, dropX, dropY) {
+  const agent = allAgents.find(a => a.id === agentId);
+  const defaultSize = 74; // matches CSS .lm-map-object.lm-pc sizing
+  let x = Math.round(dropX - defaultSize / 2);
+  let y = Math.round(dropY - defaultSize / 2);
+  x = Math.max(0, Math.min(x, fmMapEl.clientWidth  - defaultSize));
+  y = Math.max(0, Math.min(y, fmMapEl.clientHeight - defaultSize));
+
+  lmLayout.push({ id: 'pc-' + agentId, type: 'pc', refId: agentId, x, y, facing: 'up' });
+  lmRenderMap();
+  lmRenderSummary();
+  lmRenderPalette();
+  lmShowToast(`${(agent && agent.hostname) || agentId} ditambahkan — geser untuk merapikan posisi, lalu Save Layout`);
+}
+
+function lmAddObjectAt(type, dropX, dropY) {
+  const meta = LM_OBJECT_TYPES[type];
+  const obj = { id: lmGenerateId(type), type, x: 0, y: 0 };
+  if (type === 'window') { obj.w = 120; obj.h = 16; }
+
+  const defaultSize = 70; // matches CSS .lm-map-object sizing
+  const elW = obj.w || defaultSize;
+  const elH = obj.h || defaultSize;
+  let x = Math.round(dropX - elW / 2);
+  let y = Math.round(dropY - elH / 2);
+  x = Math.max(0, Math.min(x, fmMapEl.clientWidth  - elW));
+  y = Math.max(0, Math.min(y, fmMapEl.clientHeight - elH));
+  obj.x = x; obj.y = y;
+
+  lmLayout.push(obj);
+  lmRenderMap();
+  lmRenderSummary();
+  lmShowToast(`${meta.label} ditambahkan — geser untuk merapikan posisi, lalu Save Layout`);
+}
+
+function lmAttachPaletteDragHandlers(el, type, agentId) {
+  el.addEventListener('pointerdown', (e) => {
+    if (!lmEditMode) return;
+    e.preventDefault();
+
+    const meta = type === 'pc'
+      ? { icon: '🖥️', label: (el.querySelector('.lm-lbl') || {}).textContent || 'PC' }
+      : LM_OBJECT_TYPES[type];
+    const ghost = document.createElement('div');
+    ghost.className = 'lm-drag-ghost';
+    ghost.innerHTML = `<span class="lm-ico">${meta.icon}</span><span>${esc(meta.label)}</span>`;
+    ghost.style.left = e.clientX + 'px';
+    ghost.style.top  = e.clientY + 'px';
+    document.body.appendChild(ghost);
+    el.classList.add('lm-dragging-source');
+
+    const isOverMap = (ev) => {
+      const r = fmMapEl.getBoundingClientRect();
+      return ev.clientX >= r.left && ev.clientX <= r.right &&
+             ev.clientY >= r.top  && ev.clientY <= r.bottom;
+    };
+
+    const onMove = (ev) => {
+      ghost.style.left = ev.clientX + 'px';
+      ghost.style.top  = ev.clientY + 'px';
+      fmMapEl.classList.toggle('lm-drop-ready', isOverMap(ev));
+    };
+
+    const onUp = (ev) => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      ghost.remove();
+      el.classList.remove('lm-dragging-source');
+      fmMapEl.classList.remove('lm-drop-ready');
+
+      if (isOverMap(ev)) {
+        const r = fmMapEl.getBoundingClientRect();
+        if (type === 'pc') lmAddAgentAt(agentId, ev.clientX - r.left, ev.clientY - r.top);
+        else lmAddObjectAt(type, ev.clientX - r.left, ev.clientY - r.top);
+      }
+    };
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  });
+}
+
+// ── Sidebar palette — "Nodes" (real unplaced agents) + "Room Objects"
+//    (generic decorative templates, unlimited, not DB-backed). ─────────────
+function lmRenderPalette() {
+  const unplaced = lmUnplacedAgents();
+  const nodesHtml = unplaced.length
+    ? unplaced.map(agent => `
+        <div class="lm-palette-item" data-type="pc" data-agent-id="${esc(agent.id)}">
+          <span class="lm-node-dot lm-dot-${lmStatusFromAgent(agent)}"></span>
+          <span class="lm-lbl">${esc(agent.hostname || agent.id)}</span>
+        </div>
+      `).join('')
+    : `<p class="lm-palette-empty">Semua PC sudah ditaruh di denah</p>`;
+
+  const decorHtml = LM_PALETTE_DECOR_TYPES.map(type => {
+    const meta = LM_OBJECT_TYPES[type];
+    return `<div class="lm-palette-item" data-type="${type}">
+      <span class="lm-ico">${meta.icon}</span><span class="lm-lbl">${meta.label}</span>
+    </div>`;
+  }).join('');
+
+  fmPaletteListEl.innerHTML = `
+    <div class="lm-palette-group">
+      <p class="lm-group-lbl">Nodes</p>
+      ${nodesHtml}
+    </div>
+    <div class="lm-palette-group">
+      <p class="lm-group-lbl">Room Objects</p>
+      ${decorHtml}
+    </div>
+  `;
+
+  fmPaletteListEl.querySelectorAll('.lm-palette-item').forEach(el => {
+    lmAttachPaletteDragHandlers(el, el.dataset.type, el.dataset.agentId || null);
+  });
+}
+
+// ── Edit mode toggle ─────────────────────────────────────────────────────
+function lmSetEditMode(on) {
+  lmEditMode = on;
+  fmMapEl.classList.toggle('lm-edit-mode', lmEditMode);
+  fmBtnEdit.classList.toggle('lm-active', lmEditMode);
+  fmBtnEdit.textContent = lmEditMode ? 'Keluar Mode Edit' : 'Edit Layout';
+  fmSidebarEl.classList.toggle('lm-disabled', !lmEditMode);
+  fmSidebarHintEl.textContent = lmEditMode
+    ? 'Geser item ke denah'
+    : 'Aktifkan Edit Layout untuk menambah objek';
+}
+fmBtnEdit.addEventListener('click', () => lmSetEditMode(!lmEditMode));
+fmBtnAddCanvas.addEventListener('click', lmAddCanvas);
+
+// ── Save / Load / Reset — persisted via the existing generic settings
+//    mechanism (GET/POST /api/settings), same pattern as wol_networks. ─────
+async function lmSaveLayout() {
+  // IMPORTANT: must be a top-level JSON array (not { canvases: [...] }) —
+  // POST /api/settings only properly re-serializes string/array values;
+  // anything else falls back to Go's fmt.Sprintf("%v", ...), which is not
+  // valid JSON. This mirrors the existing wol_networks convention exactly.
+  const payload = lmCanvases.map(c => ({
+    id: c.id,
+    name: c.name,
+    layout: c.layout.map(o => o.type === 'pc'
+      ? { id: o.id, type: 'pc', refId: o.refId, x: o.x, y: o.y, facing: o.facing || 'up' }
+      : o),
+  }));
+  try {
+    await api('POST', '/settings', { floor_map_layout: payload });
+    lmSavedSnapshot = lmDeepClone(payload);
+    lmShowToast('Layout disimpan');
+  } catch (e) {
+    lmShowToast('Gagal menyimpan layout: ' + e.message);
+  }
+}
+
+// The prototype's hardcoded sample layout (dummy PC-01..PC-20) isn't
+// meaningful here since PCs are real registered agents, so "Reset" now means
+// "revert the active canvas to its state at the last successful save/load"
+// instead of a fixed sample.
+function lmResetLayout() {
+  const current = lmCanvases[lmActiveCanvasIndex];
+  const saved = (lmSavedSnapshot || []).find(c => c.id === current.id);
+  current.layout = lmDeepClone(saved ? saved.layout : []);
+  lmLayout = current.layout;
+  lmRenderMap();
+  lmRenderSummary();
+  lmRenderPalette();
+  lmShowToast(`"${current.name}" dikembalikan ke kondisi tersimpan terakhir`);
+}
+fmBtnSave.addEventListener('click', lmSaveLayout);
+fmBtnReset.addEventListener('click', lmResetLayout);
+
+async function lmLoadLayout() {
+  try {
+    const s = await api('GET', '/settings');
+    let saved = [];
+    try { saved = JSON.parse(s.floor_map_layout || '[]'); } catch (_) { saved = []; }
+    if (!Array.isArray(saved) || !saved.length) {
+      saved = [{ id: 'canvas-1', name: 'Ground Floor', layout: [] }];
+    }
+    lmCanvases = saved.map(c => ({ id: c.id, name: c.name, layout: Array.isArray(c.layout) ? c.layout : [] }));
+    lmCanvasIdCounter = lmCanvases.reduce((max, c) => {
+      const n = parseInt(String(c.id).replace(/^\D+-?/, ''), 10);
+      return isNaN(n) ? max : Math.max(max, n);
+    }, 0);
+    lmActiveCanvasIndex = 0;
+    lmLayout = lmCanvases[0].layout;
+    lmSavedSnapshot = lmDeepClone(lmCanvases.map(c => ({ id: c.id, name: c.name, layout: c.layout })));
+  } catch (e) {
+    console.error('lmLoadLayout:', e);
+    lmCanvases = [ lmMakeCanvas('Ground Floor', []) ];
+    lmActiveCanvasIndex = 0;
+    lmLayout = lmCanvases[0].layout;
+    lmSavedSnapshot = [];
+  }
+  lmLoaded = true;
+}
+
+function lmShowToast(msg) {
+  fmToastEl.textContent = msg;
+  fmToastEl.classList.add('lm-show');
+  clearTimeout(lmShowToast._t);
+  lmShowToast._t = setTimeout(() => fmToastEl.classList.remove('lm-show'), 2200);
+}
+
+// ---- Generic confirm dialog (Promise-based, replaces window.confirm —
+// used for destructive actions like deleting a canvas). ----
+function lmAskConfirm(message) {
+  fmConfirmMsgEl.textContent = message;
+  fmConfirmOverlay.classList.add('lm-show');
+  return new Promise(resolve => { lmConfirmResolve = resolve; });
+}
+function lmCloseConfirm(result) {
+  if (!fmConfirmOverlay.classList.contains('lm-show')) return;
+  fmConfirmOverlay.classList.remove('lm-show');
+  if (lmConfirmResolve) { lmConfirmResolve(result); lmConfirmResolve = null; }
+}
+fmConfirmOkBtn.addEventListener('click', () => lmCloseConfirm(true));
+fmConfirmCancelBtn.addEventListener('click', () => lmCloseConfirm(false));
+fmConfirmOverlay.addEventListener('click', (e) => { if (e.target === fmConfirmOverlay) lmCloseConfirm(false); });
+
+// ── Poll-cycle refresh — patches only the already-rendered placed-PC cards
+//    in place (status dot + hostname/removed label), no full re-render, so
+//    100+ cards aren't recreated every 10s tick (mirrors the old
+//    updateComputer() pattern) and an in-progress drag isn't disrupted. ────
+function lmRefreshPlacedPcVisuals() {
+  fmMapEl.querySelectorAll('.lm-map-object.lm-pc').forEach(el => {
+    const obj = lmLayout.find(o => o.id === el.dataset.id);
+    if (!obj) return;
+    const agent = allAgents.find(a => a.id === obj.refId);
+    const status = agent ? lmStatusFromAgent(agent) : 'offline';
+    el.className = el.className.replace(/\blm-status-\S+/, '').trim() + ' lm-status-' + status;
+    const idEl = el.querySelector('.lm-id');
+    if (idEl) idEl.textContent = agent ? (agent.hostname || agent.id) : '⚠ removed';
+    el.title = agent ? agent.hostname : `Agent ${obj.refId} sudah tidak terdaftar`;
+  });
+}
+
+async function loadFloorMap() {
+  try {
+    await loadAgents();
+    computers = mapAgentsToComputers(allAgents);
+    if (!lmLoaded) {
+      await lmLoadLayout();
+      lmRenderCanvasTabs();
+      lmRenderMap();
+    }
+    lmRefreshPlacedPcVisuals();
+    lmRenderPalette();
+    lmRenderSummary();
+  } catch (e) {
+    console.error('loadFloorMap:', e);
+    lmShowToast('Gagal memuat denah: ' + e.message);
+  }
 }
 
 // ── Policy Rules Modal (Phase 2 — Module 8 Policy Engine) ────────────────────
@@ -1709,6 +2199,7 @@ document.addEventListener('keydown', e => {
     closeSettings();
     closeAgentLogs();
     closeComputerModal();
+    lmCloseConfirm(false);
   }
 });
 
