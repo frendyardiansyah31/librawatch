@@ -1320,11 +1320,15 @@ func (db *DB) AcquireNextJob(agentID string, leaseUntil time.Time) (*DeployJob, 
 
 	var jobID string
 	var retryCount int
+	// Skip jobs whose expire_at has already passed — an offline-then-back PC
+	// must not run a "restart at 10:00" command at 10:45. sweepExpiredPending
+	// moves these to 'expired'; here we just never hand them out.
 	err = tx.QueryRow(`
 		SELECT j.id, r.retry_count FROM deploy_jobs j JOIN deploy_results r ON j.id = r.job_id
 		WHERE r.agent_id = ? AND r.status = 'pending'
+		  AND (j.expire_at IS NULL OR j.expire_at > ?)
 		ORDER BY j.priority DESC, j.created_at ASC LIMIT 1
-	`, agentID).Scan(&jobID, &retryCount)
+	`, agentID, fmtTime(nowWIB())).Scan(&jobID, &retryCount)
 	if err == sql.ErrNoRows {
 		return nil, 0, nil
 	}

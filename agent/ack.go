@@ -124,5 +124,6 @@ func sendDurableResult(jobID string, msg map[string]interface{}) {
 		return
 	}
 	persistPendingResult(jobID, data)
+	recordCompletedResult(jobID, data) // dedup memory: a re-delivered job_id re-sends this instead of re-running
 	wsSend(data)
 }

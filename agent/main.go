@@ -269,6 +269,7 @@ func logMsg(level, format string, args ...interface{}) {
 
 func connectLoop(ctx context.Context, agentID, serverURL string) {
 	startPolicyFallbackTicker(ctx, agentID)
+	startCommandWorker(agentID)
 
 	backoff := initialBackoff
 	attempt := 0
@@ -456,33 +457,24 @@ func handleServerMessage(agentID string, data []byte) {
 	logMsg("INFO", "Command received: type=%s job_id=%s", msgType, jobID)
 
 	switch msgType {
-	case "exec":
-		go executeCommand(agentID, msg)
-	case "winget":
-		go executeCommand(agentID, msg)
-	case "msiexec_uninstall":
-		go executeMsiexecUninstall(agentID, msg)
-	case "quiet_uninstall":
-		go executeQuietUninstall(agentID, msg)
-	case "file_deploy":
-		go deployFile(agentID, msg)
+	// OS-mutating commands go through the single serial worker, which
+	// deduplicates by job_id and rejects expired commands (see cmdqueue.go).
+	// Never execute these straight from the read loop.
+	case "exec", "winget", "msiexec_uninstall", "quiet_uninstall", "file_deploy",
+		"deepfreeze", "install_ssh", "network_mode":
+		submitCommand(agentID, msgType, msg)
+
+	// Fast / read-only / idempotent — safe to run as their own goroutines.
 	case "kill_process":
 		go handleKillProcess(agentID, msg)
 	case "kill_by_identity":
 		go handleKillByIdentity(agentID, msg)
 	case "get_logs":
 		go sendLogLines(agentID, msg)
-	case "deepfreeze":
-		go handleDeepFreeze(agentID, msg)
-	case "install_ssh":
-		go handleInstallSSH(agentID, msg)
 	case "delete_file":
 		go handleDeleteFile(agentID, msg)
 	case "exec_result_ack":
 		go clearPendingResult(jobID)
-	case "network_mode":
-		mode, _ := msg["network_mode"].(string)
-		go reconcileNetworkMode(agentID, mode)
 	case "policy_update":
 		go handlePolicyUpdate(msg)
 	}
