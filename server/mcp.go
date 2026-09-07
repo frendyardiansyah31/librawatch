@@ -208,14 +208,15 @@ func dispatchPCJob(db *DB, deployer *Deployer, hostname, jobType, payload, args,
 // agent's reply. This is the one MCP tool that needs a synchronous answer
 // rather than fire-and-forget, so it briefly waits on the existing async
 // deploy-result pipeline instead of adding a second, parallel result path.
+// The dispatch + poll + parse logic is shared with the REST endpoint
+// POST /api/agents/:id/deepfreeze — see server/deepfreeze.go.
 func queryDeepFreezeStatus(ctx context.Context, db *DB, deployer *Deployer, hostname string) (*DeepFreezeStatusOutput, error) {
 	agent, err := resolveAgentByHostname(db, hostname)
 	if err != nil {
 		return nil, err
 	}
 
-	job, err := deployer.CreateJob("deepfreeze", "query_df", "", []string{agent.ID},
-		0, nil, deployer.DefaultMaxRetry(), "mcp")
+	job, err := dispatchDeepFreeze(db, deployer, agent.ID, "query_df", "", "mcp")
 	if err != nil {
 		return nil, err
 	}
@@ -228,43 +229,13 @@ func queryDeepFreezeStatus(ctx context.Context, db *DB, deployer *Deployer, host
 		}, nil
 	}
 
-	const pollInterval = 300 * time.Millisecond
-	const pollTimeout = 8 * time.Second
-	deadline := time.Now().Add(pollTimeout)
-
-	for time.Now().Before(deadline) {
-		results, err := db.GetDeployResultsByJobID(job.ID)
-		if err == nil {
-			for _, r := range results {
-				if r.AgentID == agent.ID && !isPendingLikeStatus(r.Status) {
-					return parseDeepFreezeResult(agent.Hostname, r), nil
-				}
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return &DeepFreezeStatusOutput{Hostname: agent.Hostname, Status: "unknown", Detail: "request cancelled"}, nil
-		case <-time.After(pollInterval):
-		}
+	status, detail := pollDeepFreezeResult(ctx, db, job.ID, agent.ID)
+	if status == "pending" {
+		return &DeepFreezeStatusOutput{
+			Hostname: agent.Hostname,
+			Status:   "unknown",
+			Detail:   "PC did not respond in time",
+		}, nil
 	}
-
-	return &DeepFreezeStatusOutput{
-		Hostname: agent.Hostname,
-		Status:   "unknown",
-		Detail:   "PC did not respond in time",
-	}, nil
-}
-
-func parseDeepFreezeResult(hostname string, r DeployResult) *DeepFreezeStatusOutput {
-	if r.Status != "ok" {
-		return &DeepFreezeStatusOutput{Hostname: hostname, Status: "error", Detail: r.Output}
-	}
-	switch strings.ToUpper(strings.TrimSpace(r.Output)) {
-	case "FROZEN":
-		return &DeepFreezeStatusOutput{Hostname: hostname, Status: "frozen"}
-	case "THAWED":
-		return &DeepFreezeStatusOutput{Hostname: hostname, Status: "thawed"}
-	default:
-		return &DeepFreezeStatusOutput{Hostname: hostname, Status: "unknown", Detail: r.Output}
-	}
+	return &DeepFreezeStatusOutput{Hostname: agent.Hostname, Status: status, Detail: detail}, nil
 }
