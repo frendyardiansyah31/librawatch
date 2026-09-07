@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,7 +61,7 @@ func TestAcquireNextJob_HigherPriorityFirst(t *testing.T) {
 	high := mustJob(t, db, 5, nowWIB().Add(time.Second)) // created later, but higher priority
 	mustResult(t, db, high.ID, "agent-1", 3)
 
-	claimed, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
+	claimed, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
 	if err != nil {
 		t.Fatalf("AcquireNextJob: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestAcquireNextJob_FIFOWithinSamePriority(t *testing.T) {
 	second := mustJob(t, db, 0, nowWIB().Add(time.Second))
 	mustResult(t, db, second.ID, "agent-1", 3)
 
-	claimed, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
+	claimed, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
 	if err != nil {
 		t.Fatalf("AcquireNextJob: %v", err)
 	}
@@ -96,12 +97,12 @@ func TestAcquireNextJob_NothingClaimableWhileOneRunning(t *testing.T) {
 	job2 := mustJob(t, db, 0, nowWIB().Add(time.Second))
 	mustResult(t, db, job2.ID, "agent-1", 3)
 
-	claimed, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
+	claimed, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
 	if err != nil || claimed == nil {
 		t.Fatalf("expected first claim to succeed, got %+v, err %v", claimed, err)
 	}
 
-	claimedAgain, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
+	claimedAgain, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
 	if err != nil {
 		t.Fatalf("AcquireNextJob: %v", err)
 	}
@@ -114,7 +115,7 @@ func TestAcquireNextJob_NothingPending_ReturnsNil(t *testing.T) {
 	db := openTestDB(t)
 	mustAgent(t, db, "agent-1")
 
-	claimed, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
+	claimed, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
 	if err != nil {
 		t.Fatalf("AcquireNextJob: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestUpdateDeployResult_RetryBoundary(t *testing.T) {
 	job := mustJob(t, db, 0, nowWIB())
 	mustResult(t, db, job.ID, "agent-1", 2) // max_retry = 2
 
-	claimed, err := db.AcquireNextJob("agent-1", nowWIB().Add(-time.Minute)) // already-expired lease
+	claimed, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(-time.Minute)) // already-expired lease
 	if err != nil || claimed == nil {
 		t.Fatalf("acquire: %+v, %v", claimed, err)
 	}
@@ -145,11 +146,11 @@ func TestUpdateDeployResult_RetryBoundary(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		newRetryCount := r.RetryCount + 1
-		if err := db.UpdateDeployResult(r.JobID, r.AgentID, "pending", "Lease timeout: retrying", nil, nil, &newRetryCount); err != nil {
+		if _, err := db.UpdateDeployResult(r.JobID, r.AgentID, "pending", "Lease timeout: retrying", nil, nil, &newRetryCount, nil); err != nil {
 			t.Fatalf("requeue: %v", err)
 		}
 		// Re-claim + re-expire to simulate another lease timeout.
-		if _, err := db.AcquireNextJob(r.AgentID, nowWIB().Add(-time.Minute)); err != nil {
+		if _, _, err := db.AcquireNextJob(r.AgentID, nowWIB().Add(-time.Minute)); err != nil {
 			t.Fatalf("reacquire: %v", err)
 		}
 		results, _ = db.GetExpiredLeaseResults(nowWIB())
@@ -163,7 +164,7 @@ func TestUpdateDeployResult_RetryBoundary(t *testing.T) {
 	if r.RetryCount+1 <= r.MaxRetry {
 		t.Fatalf("expected retry budget exhausted, retry_count=%d max_retry=%d", r.RetryCount, r.MaxRetry)
 	}
-	if err := db.UpdateDeployResult(r.JobID, r.AgentID, "failed", "Lease timeout: retry limit exceeded", nil, nil, nil); err != nil {
+	if _, err := db.UpdateDeployResult(r.JobID, r.AgentID, "failed", "Lease timeout: retry limit exceeded", nil, nil, nil, nil); err != nil {
 		t.Fatalf("fail: %v", err)
 	}
 
@@ -179,13 +180,96 @@ func TestUpdateDeployResult_RetryBoundary(t *testing.T) {
 	}
 }
 
+// ── Command reliability: destructive lease handling & job expiry ────────────
+
+func TestSweepExpiredLeases_DestructiveNotRetried(t *testing.T) {
+	db := openTestDB(t)
+	mustAgent(t, db, "agent-1")
+
+	job := &DeployJob{
+		ID: generateJobID(), Type: "exec", Payload: "Restart-Computer -Force",
+		Targets: "[]", Status: "pending", CreatedBy: "system", CreatedAt: nowWIB(),
+	}
+	if err := db.InsertDeployJob(job); err != nil {
+		t.Fatalf("InsertDeployJob: %v", err)
+	}
+	mustResult(t, db, job.ID, "agent-1", 3)
+
+	// Claim with an already-expired lease so the sweep sees it as timed out.
+	if _, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(-time.Minute)); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	(&Deployer{db: db, hub: NewHub(db)}).sweepExpiredLeases()
+
+	results, err := db.GetDeployResultsByJobID(job.ID)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("get results: %+v, %v", results, err)
+	}
+	r := results[0]
+	if r.Status != "failed" {
+		t.Errorf("status = %q, want %q", r.Status, "failed")
+	}
+	if r.RetryCount != 0 {
+		t.Errorf("retry_count = %d, want 0 — a destructive command must never be retried", r.RetryCount)
+	}
+	if !strings.Contains(r.Output, "unconfirmed") {
+		t.Errorf("output = %q, want it to say the execution is unconfirmed", r.Output)
+	}
+}
+
+func TestSweepExpiredLeases_NonDestructiveRequeued(t *testing.T) {
+	db := openTestDB(t)
+	mustAgent(t, db, "agent-1")
+	job := mustJob(t, db, 0, nowWIB()) // Payload "Write-Output hi" — not destructive
+	mustResult(t, db, job.ID, "agent-1", 3)
+
+	if _, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(-time.Minute)); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	(&Deployer{db: db, hub: NewHub(db)}).sweepExpiredLeases()
+
+	results, _ := db.GetDeployResultsByJobID(job.ID)
+	if got := results[0].Status; got != "pending" {
+		t.Errorf("status = %q, want %q (requeued)", got, "pending")
+	}
+	if got := results[0].RetryCount; got != 1 {
+		t.Errorf("retry_count = %d, want 1", got)
+	}
+}
+
+func TestAcquireNextJob_SkipsExpiredJob(t *testing.T) {
+	db := openTestDB(t)
+	mustAgent(t, db, "agent-1")
+
+	past := nowWIB().Add(-time.Hour)
+	job := &DeployJob{
+		ID: generateJobID(), Type: "exec", Payload: "Write-Output hi",
+		Targets: "[]", Status: "pending", CreatedBy: "system",
+		CreatedAt: nowWIB().Add(-2 * time.Hour), ExpireAt: &past,
+	}
+	if err := db.InsertDeployJob(job); err != nil {
+		t.Fatalf("InsertDeployJob: %v", err)
+	}
+	mustResult(t, db, job.ID, "agent-1", 3)
+
+	claimed, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("AcquireNextJob: %v", err)
+	}
+	if claimed != nil {
+		t.Fatalf("expected an expired job to be skipped, got %+v", claimed)
+	}
+}
+
 func TestUpdateDeployResult_CancelledCannotBeOverwritten(t *testing.T) {
 	db := openTestDB(t)
 	mustAgent(t, db, "agent-1")
 	job := mustJob(t, db, 0, nowWIB())
 	mustResult(t, db, job.ID, "agent-1", 3)
 
-	if _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute)); err != nil {
+	if _, _, err := db.AcquireNextJob("agent-1", nowWIB().Add(10*time.Minute)); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	if err := db.CancelDeployJob(job.ID); err != nil {
@@ -193,7 +277,7 @@ func TestUpdateDeployResult_CancelledCannotBeOverwritten(t *testing.T) {
 	}
 
 	// A late real agent reply must not overwrite the cancellation.
-	if err := db.UpdateDeployResult(job.ID, "agent-1", "success", "too late", nil, nil, nil); err != nil {
+	if _, err := db.UpdateDeployResult(job.ID, "agent-1", "success", "too late", nil, nil, nil, nil); err != nil {
 		t.Fatalf("update after cancel: %v", err)
 	}
 

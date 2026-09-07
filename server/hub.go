@@ -80,6 +80,15 @@ type OutgoingMessage struct {
 
 	NetworkMode string `json:"network_mode,omitempty"` // network_mode: desired ethernet/wifi/both
 
+	// expire_at (Command Reliability): the job's expiration, so the agent can
+	// self-reject a command that went stale while it was offline or while a
+	// previous attempt stalled. The server's own expiry sweep
+	// (sweepExpiredPending) only catches commands still 'pending' — never
+	// dispatched — so without this an expired-but-already-dispatched command
+	// could still run late on the agent. nil for jobs with no expire_at;
+	// harmlessly ignored by older agents that don't read the field.
+	ExpireAt *time.Time `json:"expire_at,omitempty"`
+
 	// policy_update fields (Priority 4/5) — pushed to every connected agent
 	// whenever the policy version bumps, and sent as a direct reply to a
 	// stale policy_version_check. DeviceGroup is this specific agent's own

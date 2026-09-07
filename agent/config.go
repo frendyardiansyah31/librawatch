@@ -14,9 +14,16 @@ const (
 	meshIDFile               = `C:\LibraryAgent\mesh_id.txt`
 	tokenFile                = `C:\LibraryAgent\token.txt`
 	agentLogFile             = `C:\LibraryAgent\agent.log`
-	pendingAcksFile          = `C:\LibraryAgent\pending_acks.json`
 	selfUpdateCheckpointFile = `C:\LibraryAgent\pending_self_update.json`
 	defaultServer            = "ws://10.5.39.86:8080/ws"
+)
+
+// Mutable so `go test` can redirect them to a temp dir instead of touching
+// the real C:\LibraryAgent shared with a running LibraryAgent service
+// (same rationale as policyCacheFile).
+var (
+	pendingAcksFile   = `C:\LibraryAgent\pending_acks.json`
+	completedJobsFile = `C:\LibraryAgent\completed_jobs.json`
 )
 
 // getServerURL returns the WebSocket server URL.

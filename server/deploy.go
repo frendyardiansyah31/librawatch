@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"library-monitor/shared"
 )
 
 // leaseSweepInterval is how often the lease sweep looks for overdue/expired
@@ -162,6 +164,27 @@ func (d *Deployer) sweepExpiredLeases() {
 		return
 	}
 	for _, r := range expired {
+		// Destructive commands (shutdown / restart) whose result never came
+		// back get FAILED as "unconfirmed" and are NEVER retried: the PC may
+		// well have powered down/rebooted before it could ack, so a blind
+		// re-dispatch would risk a duplicate shutdown/restart (prompt-03
+		// §11/§12). A genuinely-executed one still gets reported — the agent
+		// replays its persisted result on reconnect (agent/ack.go).
+		if job, jerr := d.db.GetDeployJobByID(r.JobID); jerr == nil && job != nil &&
+			shared.IsDestructivePayload(job.Type, job.Payload) {
+			if _, err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "failed",
+				"execution unconfirmed after agent disconnect — NOT retried", nil, nil, nil, nil); err != nil {
+				slog.Error("fail unconfirmed destructive lease failed", "job_id", r.JobID, "agent_id", r.AgentID, "error", err)
+			}
+			slog.Warn("command lease expired",
+				"command_id", r.JobID, "agent_id", r.AgentID, "command", job.Payload,
+				"state", "FAILED", "attempt", r.RetryCount, "reason", "destructive, not retried")
+			if err := d.db.UpdateJobStatus(r.JobID); err != nil {
+				slog.Error("update job status failed", "job_id", r.JobID, "error", err)
+			}
+			continue
+		}
+
 		if r.RetryCount+1 > r.MaxRetry {
 			if _, err := d.db.UpdateDeployResult(r.JobID, r.AgentID, "failed",
 				"Lease timeout: retry limit exceeded", nil, nil, nil, nil); err != nil {
@@ -212,11 +235,12 @@ func (d *Deployer) sweepExpiredPending() {
 // (e.g. Deep Freeze freeze/thaw reboots the PC).
 func (d *Deployer) dispatch(agentID string, job *DeployJob, attempt int) bool {
 	msg := &OutgoingMessage{
-		Type:    job.Type,
-		JobID:   job.ID,
-		Attempt: &attempt,
-		Payload: job.Payload,
-		Args:    job.Args,
+		Type:     job.Type,
+		JobID:    job.ID,
+		Attempt:  &attempt,
+		Payload:  job.Payload,
+		Args:     job.Args,
+		ExpireAt: job.ExpireAt,
 	}
 	switch job.Type {
 	case "file_deploy":
