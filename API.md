@@ -36,9 +36,30 @@ Base URL: `http://<server-ip>:<port>` (default port lihat `config.yaml`).
 | GET | `/api/agents/:id/metrics` | History metrics CPU/RAM 24 jam (untuk sparkline) |
 | GET | `/api/agents/:id/processes` | List proses yang jalan di PC tsb |
 | POST | `/api/agents/:id/kill` | Kill proses di PC (body: `pid` atau `name`), tercatat di audit log |
+| POST | `/api/agents/:id/deepfreeze` | Freeze / thaw / cek status Deep Freeze 1 PC. Body: `{"action":"freeze"\|"thaw"\|"status"}`. Password `DFC.exe` diambil server-side dari `deepfreeze.password` di `config.yaml` — tak pernah di body, response, atau audit log. |
 | PATCH | `/api/agents/:id` | Update `mesh_id` (link ke MeshCentral) |
 | DELETE | `/api/agents/:id` | Hapus agent dari database, tercatat di audit log |
 | GET | `/api/agents/:id/logs` | Ambil isi `agent.log` dari PC via WebSocket relay (query `lines`, default 50) |
+
+**`POST /api/agents/:id/deepfreeze`** — satu jalur untuk tiga aksi Deep Freeze, semua lewat
+antrean `deploy_jobs` yang sama seperti deploy job lain (bukan queue baru):
+- `{"action":"freeze"}` → `DFC.exe <pw> /BOOTFROZEN` (PC balik ke kondisi awal tiap reboot).
+- `{"action":"thaw"}` → `DFC.exe <pw> /BOOTTHAWED` (perubahan disimpan).
+- `{"action":"status"}` → `DFC.exe get /ISFROZEN`, read-only, **tidak butuh password**.
+
+Response:
+- `freeze` / `thaw` → `{"job_id","status"}` — `status` = `dispatched` (PC online, terkirim
+  sekarang) atau `pending` (PC offline, job jalan otomatis saat PC reconnect).
+- `status` → `{"status","job_id"[,"detail"]}` — `status` = `frozen` / `thawed` / `offline` /
+  `pending` / `error`. Server poll internal ±8 detik nunggu balasan agen; `pending` berarti
+  agen belum balas — caller bisa lanjut poll `GET /api/deploy/:id`. `detail` diisi untuk
+  `error` / `unknown` (output mentah dari agen).
+
+Password `DFC.exe` di-inject server-side dari `deepfreeze.password` (`config.yaml`) — tak
+pernah diterima dari body, dikembalikan di response, atau ditulis ke audit log. Kalau
+`deepfreeze.password` kosong: `freeze` / `thaw` → `400`; `status` tetap jalan. Audit log
+mencatat action `deepfreeze_freeze` / `deepfreeze_thaw` / `deepfreeze_status` dengan
+`ip` = client IP. Agen tak ditemukan → `404`.
 
 ### Alerts
 | Method | Path | Fungsi |

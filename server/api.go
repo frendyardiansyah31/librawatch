@@ -138,7 +138,7 @@ func bumpPolicyVersionAndBroadcast(db *DB, hub *Hub) {
 	hub.BroadcastPolicyUpdate()
 }
 
-func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter, deployer *Deployer, uploadsPath string, maxUploadMB int64) {
+func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter, deployer *Deployer, uploadsPath string, maxUploadMB int64, deepFreezePassword string) {
 	// ── Agents ──────────────────────────────────────────────────────────
 
 	api.GET("/agents", func(c *gin.Context) {
@@ -233,6 +233,73 @@ func RegisterAPIRoutes(api *gin.RouterGroup, db *DB, hub *Hub, alerter *Alerter,
 			"ok": true, "desired_network_mode": req.Mode, "applied_live": true,
 			"result": gin.H{"network_mode": result.Mode, "status": result.Status, "output": result.Output},
 		})
+	})
+
+	// POST /agents/:id/deepfreeze runs a Deep Freeze action on one PC:
+	//   {"action":"freeze"}  -> DFC.exe <pw> /BOOTFROZEN  (revert-on-reboot ON)
+	//   {"action":"thaw"}    -> DFC.exe <pw> /BOOTTHAWED  (keep changes)
+	//   {"action":"status"}  -> DFC.exe get /ISFROZEN     (read-only, no password)
+	// The DFC.exe password is injected server-side from config.yaml's
+	// deepfreeze.password — it is never accepted in the request body, echoed in
+	// a response, or written to the audit log. freeze/thaw go through the same
+	// deploy_jobs queue as any other command (offline PC -> status "pending",
+	// runs on reconnect); status briefly polls for the agent's reply.
+	api.POST("/agents/:id/deepfreeze", func(c *gin.Context) {
+		var req struct {
+			Action string `json:"action"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		jobAction, ok := deepFreezeActions[req.Action]
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "action must be freeze, thaw, or status"})
+			return
+		}
+
+		agentID := c.Param("id")
+		agent, err := db.GetAgentByID(agentID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if agent == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+			return
+		}
+
+		password := ""
+		if req.Action != "status" {
+			if deepFreezePassword == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "deepfreeze password not configured (set deepfreeze.password in config.yaml)"})
+				return
+			}
+			password = deepFreezePassword
+		}
+
+		job, err := dispatchDeepFreeze(db, deployer, agentID, jobAction, password, "api")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		db.InsertAuditLog("deepfreeze_"+req.Action, agentID, "via=api", c.ClientIP())
+
+		if req.Action != "status" {
+			c.JSON(http.StatusOK, gin.H{"job_id": job.ID, "status": job.Status})
+			return
+		}
+
+		if job.Status != "dispatched" {
+			c.JSON(http.StatusOK, gin.H{"status": "offline", "job_id": job.ID})
+			return
+		}
+		status, detail := pollDeepFreezeResult(c.Request.Context(), db, job.ID, agentID)
+		resp := gin.H{"status": status, "job_id": job.ID}
+		if detail != "" {
+			resp["detail"] = detail
+		}
+		c.JSON(http.StatusOK, resp)
 	})
 
 	api.GET("/agents/:id/processes", func(c *gin.Context) {

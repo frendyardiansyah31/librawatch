@@ -302,7 +302,7 @@ func main() {
 
 	api := r.Group("/api", adminMiddleware, authMgr.Middleware())
 	api.POST("/logout", handleLogout(authMgr, db))
-	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB)
+	RegisterAPIRoutes(api, db, hub, alerter, deployer, cfg.Uploads.Path, cfg.Uploads.MaxSizeMB, cfg.DeepFreeze.Password)
 
 	apiV1 := r.Group("/api/v1", adminMiddleware, authMgr.Middleware())
 	apiV1.GET("/clients", handleGetClients(db))

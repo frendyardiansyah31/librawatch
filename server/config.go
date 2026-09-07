@@ -50,7 +50,7 @@ type Config struct {
 	} `yaml:"meshcentral"`
 
 	DeepFreeze struct {
-		Password string `yaml:"password"` // used by freeze_pc/thaw_pc MCP tools and the deploy panel's deepfreeze action
+		Password string `yaml:"password"` // used by freeze_pc/thaw_pc MCP tools, POST /api/agents/:id/deepfreeze, and the deploy panel's deepfreeze action
 	} `yaml:"deepfreeze"`
 
 	Uploads struct {
