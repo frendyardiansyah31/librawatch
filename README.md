@@ -1,176 +1,135 @@
+**English** · [Bahasa Indonesia](README.id.md)
+
 # LibraWatch
 
-Sistem monitoring & manajemen PC untuk perpustakaan atau lab komputer — memantau ±60 PC lab/perpustakaan (Windows 11 Home) dari satu dashboard terpusat: status online/offline, CPU/RAM, aplikasi yang berjalan, penegakan kebijakan (USB, blacklist aplikasi, dsb), deploy software massal, dan Wake-on-LAN.
+Monitor and manage ~60 library PCs (Windows 11) from one dashboard: online/offline status, CPU/RAM, running processes, policy enforcement (USB, app blacklist, config changes), fleet-wide deploy, Wake-on-LAN. Two Go binaries — a **server** (one central machine) and an **agent** (one per PC, runs as a Windows Service) — talking over a single persistent WebSocket. Local network only, no internet needed.
 
-## Latar Belakang
+This README is about setup and running it. Internal architecture lives in `CLAUDE.md`, the API contract in `API.md` / `docs/openapi.yaml`, every config knob in `docs/CONFIG.md`.
 
-Perpustakaan atau lab komputer publik biasanya mengoperasikan puluhan PC yang sebelumnya dipantau/dikelola secara manual atau lewat kombinasi tool terpisah (Veyon untuk classroom control, cek fisik untuk software terpasang, dsb) dan membutuhkan koneksi via LAN/WLAN, sehingga tidak harus terhubung internet terlebih dahulu. LibraWatch dibangun untuk menyatukan kebutuhan itu ke satu sistem in-house:
+## Prerequisites
 
-- **Visibilitas real-time** — tahu PC mana yang online, siapa yang login, proses apa yang berjalan, tanpa keliling fisik.
-- **Penegakan kebijakan otomatis** — blokir/catat aplikasi terlarang, pantau USB storage, deteksi perubahan konfigurasi (wallpaper, Run key, scheduled task) tanpa intervensi manual per PC.
-- **Operasional massal** — deploy installer/patch, jalankan perintah, restart/shutdown/Wake-on-LAN, uninstall software, ke satu PC atau seluruh fleet sekaligus dari dashboard.
-- **Audit trail** — semua aksi admin (kill process, hapus agent, deploy) tercatat untuk akuntabilitas.
+- **Go 1.25+.** The `server/` module needs Go 1.25, `agent/` and `shared/` need 1.23, and `go.work` pins the workspace at 1.25. To build everything, use 1.25 or newer.
+- **No C toolchain needed.** The SQLite driver (`modernc.org/sqlite`) is pure Go, no CGO. The catch: `go test -race` does not work in this environment — `-race` needs `CGO_ENABLED=1` plus a gcc/MinGW that isn't installed here.
+- **Runtime is Windows.** The server builds and runs on other OSes for dev, but the agent is full of Win32 syscalls (USB watch, registry watch, popups, session launch) and only really runs on Windows. Real target: Windows 11 Home, a fleet of ~60 PCs.
+- The dashboard has no build step. It's plain HTML/CSS/JS and the server serves it directly — just drop the `dashboard/` folder next to the built `server.exe`.
 
-Sistem terdiri dari dua komponen Go independen: **server** (jalan di satu mesin pusat) dan **agent** (jalan di tiap PC target sebagai Windows Service), berkomunikasi lewat WebSocket persisten.
+## Run the server (local, dev)
 
-## Fitur Utama
-
-- Monitoring CPU/RAM/proses per PC + histori (sparkline 24 jam)
-- Application Catalog — inventaris aplikasi yang pernah terdeteksi jalan, review status (allowed/blocked/ignored)
-- Software Inventory + remote uninstall (MSI/quiet-uninstall/winget, tier otomatis)
-- Policy Engine — event USB/download/desktop/config/install/exec dievaluasi terhadap rule yang bisa diatur admin (log/notify/block/delete/kill)
-- Peripheral Tamper Detection (keyboard/mouse terlepas)
-- Deploy panel — exec PowerShell, install via winget, jalankan file upload, Deep Freeze freeze/thaw, install SSH — ke satu PC/grup/lantai/semua PC
-- Wake-on-LAN multi-subnet (broadcast dihitung otomatis dari CIDR per network profile)
-- Alert Telegram/Email (CPU/RAM tinggi, aplikasi blacklist, offline/recovery, USB, peripheral lepas)
-- Audit log semua aksi admin
-- Integrasi MCP (Model Context Protocol) untuk kontrol via bot/AI (OpenClaw) — restart/shutdown/freeze/thaw/kill/cek status
-- Sinkronisasi read-only ke Veyon (`veyon_sync.py`) untuk classroom control
-
-## Tech Stack
-
-**Server** (`server/`)
-- Go 1.25, [Gin](https://github.com/gin-gonic/gin) (HTTP router)
-- [gorilla/websocket](https://github.com/gorilla/websocket) — koneksi persisten ke tiap agent
-- [modernc.org/sqlite](https://modernc.org/sqlite) — SQLite pure-Go (tanpa CGO), penyimpanan data di `data/library.db`
-- [kardianos/service](https://github.com/kardianos/service) — jalan sebagai Windows Service ("Library Monitor Server")
-- MCP server (`github.com/modelcontextprotocol/go-sdk`) untuk endpoint `/mcp`
-- bcrypt untuk hash password admin, YAML (`gopkg.in/yaml.v3`) untuk `config.yaml`
-
-**Agent** (`agent/`)
-- Go 1.23, [kardianos/service](https://github.com/kardianos/service) — jalan sebagai Windows Service ("LibraryAgent") atau Scheduled Task
-- [gorilla/websocket](https://github.com/gorilla/websocket) — koneksi ke server
-- [shirou/gopsutil](https://github.com/shirou/gopsutil) — metrik CPU/RAM/proses
-- Win32 API langsung (syscall, tanpa CGO) untuk USB detection, popup GUI, session launch (SYSTEM → sesi user yang login), registry watch, dsb — lihat `agent/internal/`
-
-**Dashboard** (`dashboard/`)
-- Vanilla HTML/CSS/JS (tanpa framework, tanpa build step) — di-serve langsung oleh server Go di `/` dan `/static/*`
-
-**Shared** (`shared/`) — modul Go kecil yang dipakai bareng oleh server & agent (identitas software, policy matching, parsing command uninstall) supaya logika kritikal tidak bisa berbeda antara kedua sisi.
-
-**Integrasi eksternal**: Telegram Bot API, SMTP (email), Deep Freeze (`DFC.exe`), MeshCentral (link saja), Veyon (`veyon_sync.py`, Python, read-only pull dari `GET /api/v1/computers`).
-
-## Arsitektur Singkat
+From the repo root:
 
 ```
-Dashboard (browser) ──HTTP/session──> Server (Gin, :8080)
-                                          │
-                                          ├── SQLite (data/library.db)
-                                          │
-                                          └──WebSocket (/ws)──> Agent #1 (PC lab)
-                                                             └─> Agent #2 (PC lab)
-                                                             └─> ... (~60 agent)
+cd server && go build -o ../library-server.exe .
+cd .. && ./library-server.exe
 ```
 
-Server dan agent adalah **dua modul Go terpisah**, masing-masing punya `go.mod` sendiri (disatukan lewat `go.work` hanya untuk tooling/editor, bukan untuk build). Detail arsitektur lebih dalam (Hub, Deployer, PolicyEngine, dst) ada di `CLAUDE.md`, dan referensi lengkap endpoint HTTP ada di `API.md`.
+If `config.yaml` doesn't exist, the server writes one with every credential blank and **keeps running anyway** — dashboard login is off and anyone can get in. Fine for a quick look, don't leave it like that. Dashboard: `http://localhost:8080`.
 
-## Deploy — Server
-
-### Struktur Folder
-
-Server butuh berjalan dari sebuah folder (bukan cuma satu file exe) — minimal harus ada:
+The server has to run from a folder. Minimum contents:
 
 ```
-library-server/
-├── library-server.exe   ← hasil build (lihat langkah Build & Jalankan di bawah)
-├── config.yaml           ← wajib disiapkan sendiri, lihat "Setup config.yaml" di bawah
-└── dashboard/             ← wajib di-copy dari repo (index.html, app.js, style.css) — bukan di-generate otomatis
+library-server.exe
+config.yaml          ← you prepare this (see below)
+dashboard/           ← copy it from the repo as-is; without it the UI is dead (agents still connect)
 ```
 
-`dashboard/` **harus** ikut di-copy persis seperti isinya di repo ini — server serve UI dashboard langsung dari folder itu (`/` dan `/static/*`), kalau folder ini tidak ada, dashboard tidak bisa diakses (walau agent tetap bisa connect lewat `/ws`).
+`data/`, `logs/`, and `uploads/` are created automatically on first start.
 
-Sub-folder berikut **dibuat otomatis** oleh server saat pertama kali jalan (tidak perlu disiapkan manual, tapi boleh tahu isinya):
+## Set up config.yaml
+
+This file holds the real credentials (`auth.admin_password`, `auth.mcp_token`, `deepfreeze.password`) and is **not committed**. Copy it from the template:
 
 ```
-data/       ← library.db (SQLite)
-logs/       ← server.log (auto-rotate)
-uploads/    ← file installer yang di-upload lewat panel Deploy
+copy config.yaml.EXAMPLE config.yaml
 ```
 
-Kalau deploy pakai `.\library-server.exe install` sebagai Windows Service, service jalan dengan working directory di folder tempat exe ini berada (bukan `C:\Windows\System32`) — jadi pastikan seluruh isi folder di atas (exe + `config.yaml` + `dashboard/`) memang ditaruh bersebelahan di lokasi permanennya sebelum `install`, bukan di folder sementara.
+Fill in at least enough to turn dashboard login on:
 
-### Setup `config.yaml`
+- `auth.admin_username` + `auth.admin_password` — if either is blank, auth is off entirely.
+- Everything else is optional: `auth.mcp_token` (the `/mcp` endpoint), `deepfreeze.password` (freeze/thaw actions), `wol.networks` (Wake-on-LAN subnets — the broadcast address is derived from the CIDR, don't set it by hand), `telegram.*` / `email.*` (alerts).
 
-`config.yaml` (root repo) menyimpan kredensial asli (password login dashboard, `mcp_token`, password Deep Freeze) — file ini **sengaja tidak ikut di-commit** (lihat `.gitignore`). Ada dua cara menyiapkannya:
+Never put real secret values in the repo. For the admin password, `config.yaml` takes plaintext (the server bcrypts it at startup) or a bcrypt hash directly — `./library-server.exe hash-password <plaintext>` prints a hash you can paste into `auth.admin_password`.
 
-1. **Copy dari template** — cara yang direkomendasikan:
+Per-key detail plus the **seed-once** rule (`alerts.*`, `telegram.*`, `email.*`, `deploy.*`, `wol.*` are only read once, to seed the `settings` table on first run; after that you edit them in the dashboard, not the file) is in `docs/CONFIG.md`.
 
-   ```bash
-   copy config.yaml.EXAMPLE config.yaml
-   ```
+Things that trip people up:
 
-   lalu edit `config.yaml` dan isi minimal:
-   - `auth.admin_password` — ganti dari `CHANGE_ME`, ini password login dashboard.
-   - `auth.mcp_token` — generate token acak kalau mau pakai endpoint `/mcp` (mis. `openssl rand -hex 32`), kosongkan kalau tidak dipakai.
-   - `deepfreeze.password` — isi kalau PC target pakai Deep Freeze, kosongkan kalau tidak.
-   - `wol.networks` — isi subnet PC yang mau di-Wake-on-LAN (lihat contoh di dalam file); broadcast address dihitung otomatis dari CIDR, jangan diisi manual.
-   - Bagian lain (`telegram.*`, `email.*`, `meshcentral.url`, `alerts.*`) opsional, isi kalau fitur terkait mau dipakai.
+- `config.yaml.EXAMPLE` has no `deploy:` block. Not a problem — the code falls back to defaults (`lease_minutes: 10`, `default_max_retry: 3`).
+- There's a `config.yaml.EXAMPLE` and a `config.yaml.example` with identical content. Windows is case-insensitive, so it's really one file.
+- `server/config.yaml` is a leftover and unused. The binary always reads `config.yaml` next to its own `.exe`.
 
-2. **Biarkan server generate otomatis** — kalau `config.yaml` belum ada saat pertama kali dijalankan, server otomatis membuatnya dengan nilai default aman (semua kredensial kosong) dan **tetap langsung jalan** dengan default itu (`admin_username`/`admin_password` kosong = login dashboard nonaktif, siapa saja bisa akses). Server cuma cetak pesan pengingat di log, tidak berhenti — jadi segera stop, isi `config.yaml` sesuai poin di atas, lalu restart.
+## External dependencies
 
-`server/config.yaml` (di dalam folder `server/`) adalah file leftover yang **tidak dipakai** — binary selalu baca `config.yaml` relatif ke lokasi `.exe`-nya sendiri (root repo kalau dijalankan dari sana).
+The core features (monitoring, deploy, policy, dashboard, audit) run with just the server + agent + a local network. The rest is optional:
 
-### Build & Jalankan
+- **Telegram / SMTP** — alert notifications only. Blank config = no notifications, everything else is normal.
+- **Deep Freeze** (`DFC.exe` on the agent PC) — freeze/thaw actions only. Blank `deepfreeze.password` = the freeze/thaw endpoint returns HTTP 400; status checks still work.
+- **MeshCentral** — a dashboard deep-link, nothing more. Not set up = only that link is useless.
+- **WinRM** — only for `push_all.ps1` (fleet deploy). The per-PC `install.bat` doesn't need it.
+- **Veyon** (`veyon_sync.py`) — a separate classroom-control integration that runs on its own on the Veyon host, read-only pull from `GET /api/v1/computers`.
 
-Build dari root repo:
+## Build & deploy the agent
 
-```bash
-go build -ldflags="-s -w" -o library-server.exe .\server\
+```
+cd agent && go build -o ../deploy/agent.exe .
 ```
 
-Jalankan (foreground, untuk dev/testing):
+The output **must** go to `deploy/agent.exe` — the deploy scripts read it from there. Three paths, depending on scale:
 
-```bash
-.\library-server.exe
+| Path | For | Mechanism |
+|---|---|---|
+| `deploy/install.bat` (run as Admin on the target PC) | one PC | Windows Service `LibraryAgent`, server URL from `server.txt` next to the script |
+| `deploy/push_all.ps1 -User <u> -Pass <p> -Server ws://<ip>:8080/ws` | the whole fleet, over WinRM | Scheduled Task `/RU SYSTEM /RL HIGHEST /SC ONSTART` to every IP in `deploy/ips.txt` |
+| `deploy/_run_as_service.bat` | local dev | stop/copy/start the local service, hardcoded `ws://localhost:8080/ws` |
+
+The agent always runs as **SYSTEM / Session 0**, not as the logged-in user. UI features (the USB popup) get past that with `agent/internal/sessionlaunch` so the window shows up in the user's session.
+
+Setting up WinRM for `push_all.ps1` is annoying but required if you want fleet deploy — it has to be enabled on every target and the local admin account has to be the same on all PCs. To uninstall one PC: `deploy/uninstall.bat` (Admin). The agent ID stays in `C:\LibraryAgent\id.txt` so a re-install keeps the same identity.
+
+## Production — server as a Windows Service
+
 ```
-
-Untuk produksi, install sebagai Windows Service (butuh Administrator):
-
-```bash
-.\library-server.exe install
+./library-server.exe install
 net start "LibraryMonitor"
 ```
 
-Dashboard bisa diakses di `http://<ip-server>:8080` (default port, lihat `config.yaml`). Setelah build ulang binary, **service yang sedang jalan harus di-restart** (`net stop`/`net start "LibraryMonitor"`) supaya perubahan kode/config benar-benar dipakai — build saja tidak cukup.
+The service runs with its working directory set to the `.exe`'s folder, so put the exe + `config.yaml` + `dashboard/` in their permanent location **before** `install`, not in a temp folder.
 
-## Deploy — Client/Agent
+**A rebuild is not picked up on its own.** After building, `net stop` then `net start "LibraryMonitor"` (or the `LibraryAgent` service on the agent side) so the new binary actually runs.
 
-Build dari root repo (output **harus** ke `deploy\agent.exe`, dipakai script di bawah):
+## Tests
 
-```bash
-go build -ldflags="-H windowsgui -s -w" -o deploy\agent.exe .\agent\
+Per module — there's no root `go.mod`, so `go build ./...` / `go test ./...` from the repo root fails:
+
+```
+cd server && go test ./...
+cd agent  && go test ./...
+cd shared && go test ./...
 ```
 
-Ada tiga cara deploy agent ke PC target, tergantung skala:
+Read the server result carefully: `server/deploy_test.go` has a long-standing compile break against the current `db.go` signatures (`AcquireNextJob` / `UpdateDeployResult`). It **blocks `go test ./...` for the entire `server` package**, not just that file — so "server tests are green" means nothing until it's fixed. The workaround used in earlier sessions: move `deploy_test.go` aside, run the tests, put it back. See the `SESSION_MEMORY.md` entry for 2026-08-13.
 
-### 1. Satu PC, manual (`deploy/install.bat`)
+`go test -race` doesn't work here (see Prerequisites).
 
-Copy folder `deploy/` (berisi `agent.exe`, `install.bat`, dan opsional `server.txt` berisi URL WebSocket server) ke PC target, lalu jalankan **sebagai Administrator**:
+## Folder layout
 
-```bat
-install.bat
+```
+server/     Go module — Gin + SQLite, runs as the "LibraryMonitor" service
+agent/      Go module — the "LibraryAgent" service; internal/ = Win32 syscalls
+shared/     Go module used by both server & agent (identity, policy match, uninstall parsing)
+test/       standalone multi-agent load simulator
+dashboard/  static UI (index.html, app.js, style.css), served by the server
+deploy/     agent.exe + install scripts (install.bat, push_all.ps1, ips.txt)
+docs/       CONFIG.md, openapi.yaml  (see note below)
+veyon_sync.py   pulls GET /api/v1/computers -> Veyon, read-only
+config.yaml.EXAMPLE   server config template
 ```
 
-Ini meng-install agent sebagai Windows Service `LibraryAgent` (auto-start, restart on failure). Untuk uninstall: jalankan `uninstall.bat` (Administrator) — ID agent tetap disimpan di `C:\LibraryAgent\id.txt` supaya re-install nanti pakai identitas yang sama.
+## Other docs
 
-### 2. Mass deploy ke seluruh fleet via WinRM (`deploy/push_all.ps1`)
+- **`API.md`** — quick reference for every endpoint (`/api/*`, `/api/v1/*`, `/mcp`).
+- **`docs/openapi.yaml`** — the formal OpenAPI 3.0 contract (no `/mcp`).
+- **`docs/CONFIG.md`** — full config & secret inventory plus how to rotate each one.
+- **`CLAUDE.md`** — internal architecture (Hub, Deployer, PolicyEngine, and so on) + code conventions.
+- **`SESSION_MEMORY.md`** — chronological log of non-obvious decisions between sessions.
 
-Isi `deploy/ips.txt` dengan daftar IP target (satu per baris), pastikan WinRM aktif di semua target, lalu dari mesin admin:
-
-```powershell
-.\deploy\push_all.ps1 -User "Administrator" -Pass "secret" -Server "ws://<ip-server>:8080/ws"
-```
-
-Script ini push `agent.exe` + daftarkan sebagai **Scheduled Task** (`/RU SYSTEM /RL HIGHEST /SC ONSTART`, bukan Windows Service) ke tiap PC di `ips.txt`, lalu langsung menjalankannya. Log hasil deploy tersimpan di `deploy/deploy_log.txt`.
-
-### 3. Dev/test lokal (`deploy/_run_as_service.bat`)
-
-Untuk iterasi cepat di mesin development yang sama dengan server (agent connect ke `ws://localhost:8080/ws`): stop service lokal, copy `agent.exe` terbaru, start ulang.
-
-Baik service (`install.bat`) maupun scheduled task (`push_all.ps1`) sama-sama jalan sebagai **SYSTEM / Session 0** — fitur yang butuh UI (mis. popup peringatan USB) menembus batasan ini lewat `agent/internal/sessionlaunch` untuk menampilkannya di sesi user yang sedang login.
-
-## Dokumentasi Lain
-
-- **`API.md`** — referensi lengkap semua endpoint HTTP (`/api/*`, `/api/v1/*`, `/mcp`).
-- **`CLAUDE.md`** — panduan arsitektur & konvensi untuk kontributor/AI coding agent (struktur Hub/Deployer/PolicyEngine, aturan build, dsb).
-- **`SESSION_MEMORY.md`** — log kronologis keputusan & temuan non-obvious dari sesi pengembangan sebelumnya.
+`docs/`, `CLAUDE.md`, and `SESSION_MEMORY.md` are **not in git** (see `.gitignore`) — a fresh clone won't have them. Only `API.md` is tracked.

@@ -1,0 +1,2109 @@
+openapi: 3.0.3
+info:
+  title: Library Monitor API
+  description: |
+    API server untuk UIII Library Monitor — monitoring & manajemen ~60 PC perpustakaan
+    (metrics CPU/RAM, alert, deploy job, application catalog, event timeline, policy engine).
+
+    Dihasilkan dari source code `server/` — `main.go`, `api.go`, `deepfreeze.go`,
+    `commands.go`, `computers.go`, `clients.go`, `software.go`.
+    MCP endpoint (`/mcp`) sengaja tidak dicakup di spesifikasi ini.
+  version: "1.0.0"
+  contact:
+    name: Library Monitor
+servers:
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8080"
+
+tags:
+  - name: Public
+    description: Endpoint tanpa autentikasi (dipakai agent, bukan dashboard user)
+  - name: Auth
+    description: Login/logout session dashboard
+  - name: Agents
+    description: Manajemen & monitoring PC (agent)
+  - name: Alerts
+    description: Alert CPU/RAM/blacklist/offline/peripheral
+  - name: Applications
+    description: Application Catalog (Phase 1)
+  - name: Categories
+    description: Kategori aplikasi
+  - name: Events
+    description: Event timeline System Policy Enforcement (Phase 2)
+  - name: PolicyRules
+    description: Policy Engine rules (Phase 2)
+  - name: Settings
+    description: Konfigurasi threshold, Telegram, Email, dll
+  - name: Audit
+    description: Audit log aksi admin
+  - name: Health
+    description: Status & ringkasan server
+  - name: Deploy
+    description: Deploy job (exec, winget, file_deploy, deepfreeze, install_ssh)
+  - name: Notifications
+    description: Test notifikasi Telegram/Email
+  - name: Logs
+    description: Server & agent log tailing
+  - name: ClientsV1
+    description: Proyeksi read-only agent untuk konsumen eksternal (mis. Veyon sync)
+  - name: ComputersV1
+    description: Proyeksi read-only komputer (identitas + lokasi fisik) untuk integrasi eksternal
+  - name: Software
+    description: Software Inventory fleet-wide + remote uninstall berjenjang (MSI / quiet-uninstall / winget)
+  - name: Commands
+    description: >
+      Generic Command API (v1) — satu endpoint untuk semua aksi remote (restart,
+      shutdown, lock, kill_process, dst) yang dieksekusi Windows agent. Command
+      dibuat sebagai job asinkron di queue yang sama dengan Deploy job
+      (deploy_jobs/deploy_results), lalu dipickup oleh dispatcher/agent yang
+      sudah ada — tidak dieksekusi langsung saat request diterima. Dirancang
+      untuk dikonsumsi Web Dashboard, OpenClaw Plugin, Telegram (via OpenClaw),
+      serta mobile/CLI di masa depan, sebagai pengganti gaya banyak endpoint
+      per-aksi (POST /shutdown, POST /restart, dst).
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ── Public ──────────────────────────────────────────────────────────────
+  /ws:
+    get:
+      tags: [Public]
+      summary: WebSocket endpoint untuk agent
+      description: |
+        Upgrade koneksi ke WebSocket. Dipakai oleh seluruh agent (PC) untuk connect
+        dan mengirim metrics/processes/events secara real-time. **Public** — tidak
+        melewati `adminMiddleware` maupun session auth, karena harus bisa diakses oleh
+        semua 60 PC agent. Autentikasi agent (kalau `auth.token` di config diisi)
+        dilakukan lewat pesan pertama setelah upgrade, bukan lewat header HTTP biasa.
+      security: []
+      responses:
+        "101":
+          description: Switching Protocols — koneksi WebSocket berhasil dibuka
+        "400":
+          description: Bukan permintaan upgrade WebSocket yang valid
+
+  /:
+    get:
+      tags: [Public]
+      summary: Serve dashboard index.html
+      description: Tetap melewati `adminMiddleware` (IP whitelist), tapi tidak butuh session login.
+      security: []
+      responses:
+        "200":
+          description: Halaman dashboard HTML
+          content:
+            text/html:
+              schema:
+                type: string
+        "403":
+          description: IP client tidak masuk whitelist admin
+
+  /static/{file}:
+    get:
+      tags: [Public]
+      summary: Static files dashboard (html/js/css)
+      security: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Path relatif file di dalam folder `dashboard/`
+      responses:
+        "200":
+          description: Isi file static
+        "404":
+          description: File tidak ditemukan
+
+  /api/login:
+    post:
+      tags: [Auth]
+      summary: Login, mendapatkan session token
+      description: Dibatasi rate limiter (`NewLoginRateLimiter`) untuk mencegah brute force.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Login berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+        "401":
+          description: Kredensial salah
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: Terlalu banyak percobaan gagal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/file/{filename}:
+    get:
+      tags: [Public]
+      summary: Download file upload (installer) oleh agent
+      description: |
+        Public (tanpa session token) karena dipakai agent untuk download file,
+        bukan dashboard. Ada proteksi path traversal (`filepath.Clean` + prefix check)
+        dan hanya melayani file yang berada di direktori uploads.
+      security: []
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Isi file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Nama file tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Akses ditolak (di luar direktori uploads)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── Auth (session) ──────────────────────────────────────────────────────
+  /api/logout:
+    post:
+      tags: [Auth]
+      summary: Logout, hapus session
+      responses:
+        "200":
+          description: Logout berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
+  # ── Agents ──────────────────────────────────────────────────────────────
+  /api/agents:
+    get:
+      tags: [Agents]
+      summary: List semua agent (PC)
+      responses:
+        "200":
+          description: Daftar agent beserta metrics terakhir
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AgentWithMetrics" }
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/agents/{id}:
+    get:
+      tags: [Agents]
+      summary: Detail 1 agent
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      responses:
+        "200":
+          description: Detail agent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentWithMetrics" }
+        "404":
+          description: Agent tidak ditemukan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    patch:
+      tags: [Agents]
+      summary: Update mesh_id / device_group / floor
+      description: |
+        Semua field opsional (pointer JSON) — kirim hanya field yang ingin diubah,
+        field lain tidak akan tersentuh. Update `device_group` dan `floor` tercatat
+        di audit log.
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mesh_id:
+                  type: string
+                  nullable: true
+                  description: Link ke MeshCentral
+                device_group:
+                  type: string
+                  nullable: true
+                  description: Dipakai sebagai dimensi matching di policy_rules
+                floor:
+                  type: string
+                  nullable: true
+                  description: Lantai lokasi PC
+      responses:
+        "200":
+          description: Update berhasil
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+        "400":
+          description: Body tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      tags: [Agents]
+      summary: Hapus agent dari database
+      description: Menghapus juga metrics, processes, alerts, deploy_results terkait. Tercatat di audit log.
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      responses:
+        "200":
+          description: Berhasil dihapus
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /api/agents/{id}/metrics:
+    get:
+      tags: [Agents]
+      summary: History metrics CPU/RAM 24 jam
+      description: Untuk sparkline di dashboard.
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      responses:
+        "200":
+          description: Daftar metric
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Metric" }
+
+  /api/agents/{id}/processes:
+    get:
+      tags: [Agents]
+      summary: List proses yang sedang jalan di PC
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      responses:
+        "200":
+          description: Daftar proses (urut CPU desc)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Process" }
+
+  /api/agents/{id}/kill:
+    post:
+      tags: [Agents]
+      summary: Kill proses di PC
+      description: Body wajib salah satu dari `pid` atau `name`. Tercatat di audit log.
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pid:
+                  type: integer
+                name:
+                  type: string
+      responses:
+        "200":
+          description: Proses berhasil dikill
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  output:
+                    type: string
+        "400":
+          description: pid/name tidak diisi, atau agent gagal kill
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/agents/{id}/network-mode:
+    post:
+      tags: [Agents]
+      summary: Set desired-state mode jaringan (ethernet/wifi/both)
+      description: |
+        Mode selalu dipersist dulu ke DB (`desired_network_mode`), lalu kalau agent
+        online dipush langsung dan ditunggu hasil reconciliation-nya sebentar.
+        Kalau agent offline, mode akan diterapkan otomatis saat agent reconnect —
+        tidak ada mekanisme retry terpisah. Tercatat di audit log.
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [ethernet, wifi, both]
+      responses:
+        "200":
+          description: |
+            Mode berhasil dipersist. `applied_live=true` kalau agent online dan
+            reconciliation sukses; `false` kalau agent offline (akan reconcile saat
+            reconnect) atau push gagal/timeout (`message` berisi alasannya).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  desired_network_mode:
+                    type: string
+                    enum: [ethernet, wifi, both]
+                  applied_live:
+                    type: boolean
+                  message:
+                    type: string
+                  result:
+                    type: object
+                    properties:
+                      network_mode:
+                        type: string
+                      status:
+                        type: string
+                      output:
+                        type: string
+        "400":
+          description: mode tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/agents/{id}/deepfreeze:
+    post:
+      tags: [Agents]
+      summary: Deep Freeze freeze / thaw / status untuk 1 PC
+      description: |
+        Satu endpoint untuk tiga aksi Deep Freeze, semuanya lewat antrean
+        `deploy_jobs` yang sama seperti deploy job lain (bukan queue baru):
+        - `freeze` → `DFC.exe <pw> /BOOTFROZEN` (PC balik ke kondisi awal tiap reboot)
+        - `thaw`   → `DFC.exe <pw> /BOOTTHAWED` (perubahan disimpan)
+        - `status` → `DFC.exe get /ISFROZEN` (read-only, **tanpa password**)
+
+        Password `DFC.exe` di-inject server-side dari `deepfreeze.password`
+        (`config.yaml`) — tidak pernah diterima dari body, dikembalikan di
+        response, atau ditulis ke audit log. Kalau `deepfreeze.password` kosong:
+        `freeze`/`thaw` → `400`; `status` tetap jalan. Audit log mencatat action
+        `deepfreeze_freeze` / `deepfreeze_thaw` / `deepfreeze_status`.
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [freeze, thaw, status]
+      responses:
+        "200":
+          description: |
+            `freeze`/`thaw` → `{job_id, status}` dengan `status` = `dispatched`
+            (PC online, terkirim sekarang) atau `pending` (PC offline, jalan
+            otomatis saat PC reconnect). `status` → `{status, job_id, detail?}`
+            dengan `status` = `frozen` / `thawed` / `offline` / `pending` /
+            `error` / `unknown`; server poll internal ±8 detik menunggu balasan
+            agen, `detail` diisi untuk `error` / `unknown` (output mentah agen).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [dispatched, pending, frozen, thawed, offline, error, unknown]
+                  detail:
+                    type: string
+        "400":
+          description: action tidak valid, atau `deepfreeze.password` kosong untuk freeze/thaw
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Agent tidak ditemukan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500":
+          description: Server / DB error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/agents/{id}/logs:
+    get:
+      tags: [Logs]
+      summary: Ambil isi agent.log dari PC via WebSocket relay
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+        - name: lines
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+      responses:
+        "200":
+          description: Isi log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lines:
+                    type: string
+        "503":
+          description: Agent tidak online / gagal merespons
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/agents/{id}/events:
+    get:
+      tags: [Events]
+      summary: Event timeline 1 PC
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+        - name: type
+          in: query
+          schema:
+            type: string
+          description: Filter jenis event (usb_inserted, download_created, dll)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Daftar event
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Event" }
+
+  # ── Alerts ──────────────────────────────────────────────────────────────
+  /api/alerts:
+    get:
+      tags: [Alerts]
+      summary: List alert terakhir
+      description: |
+        Alert types: `cpu_high`, `ram_high` (threshold + 3x consecutive check),
+        `blacklisted_app` (cooldown 60 menit per app per agent), `offline`,
+        `recovery`, `peripheral_removed` (Peripheral Tamper Detection).
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        "200":
+          description: Daftar alert
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Alert" }
+
+  # ── Applications / Categories ───────────────────────────────────────────
+  /api/applications:
+    get:
+      tags: [Applications]
+      summary: List katalog aplikasi
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending_review, allowed, blocked, ignored]
+        - name: category_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Daftar aplikasi + statistik
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ApplicationWithStats" }
+        "400":
+          description: Filter tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/applications/{id}:
+    get:
+      tags: [Applications]
+      summary: Detail 1 aplikasi + daftar sighting per device
+      parameters:
+        - $ref: "#/components/parameters/ApplicationID"
+      responses:
+        "200":
+          description: Detail aplikasi
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplicationDetail" }
+        "404":
+          description: Aplikasi tidak ditemukan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    patch:
+      tags: [Applications]
+      summary: Update status dan/atau kategori aplikasi
+      description: Tercatat di audit log.
+      parameters:
+        - $ref: "#/components/parameters/ApplicationID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [pending_review, allowed, blocked, ignored]
+                category_id:
+                  type: integer
+                  nullable: true
+      responses:
+        "200":
+          description: Update berhasil
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+        "400":
+          description: status tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/categories:
+    get:
+      tags: [Categories]
+      summary: List kategori aplikasi
+      description: |
+        Seed default: Browser, Office, Academic, Programming, Graphic Design,
+        Multimedia, Games, Remote Access, Utilities, System.
+      responses:
+        "200":
+          description: Daftar kategori
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Category" }
+
+  # ── Events ──────────────────────────────────────────────────────────────
+  /api/events:
+    get:
+      tags: [Events]
+      summary: List event lintas semua PC
+      description: |
+        Event types: `usb_inserted`, `usb_removed`, `download_created`, `download_deleted`,
+        `wallpaper_changed`, `theme_changed`, `config_changed`, `software_installed`,
+        `software_removed`, `software_updated`, `exec_policy`, `peripheral_connected`,
+        `peripheral_removed`. Field `action` (`log`/`notify`/`blocked`/`deleted`/`killed`)
+        adalah hasil keputusan Policy Engine.
+      parameters:
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: Daftar event
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Event" }
+
+  # ── Policy Rules ────────────────────────────────────────────────────────
+  /api/policy-rules:
+    get:
+      tags: [PolicyRules]
+      summary: List semua rule (aktif maupun nonaktif)
+      responses:
+        "200":
+          description: Daftar policy rule
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PolicyRule" }
+    post:
+      tags: [PolicyRules]
+      summary: Buat rule baru
+      description: |
+        Semua field filter (`event_type`, `category_id`, `app_status`, `file_extension`,
+        `execution_location`, `device_group`) opsional — kosong berarti "berlaku untuk
+        semua". Matching: rule dengan filter paling spesifik (field non-kosong terbanyak)
+        yang menang kalau ada beberapa rule cocok sekaligus; kalau tidak ada rule cocok,
+        default `log`. Tercatat di audit log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyRuleInput" }
+      responses:
+        "200":
+          description: Rule berhasil dibuat
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyRule" }
+        "400":
+          description: Body tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/policy-rules/{id}:
+    patch:
+      tags: [PolicyRules]
+      summary: Update rule
+      parameters:
+        - $ref: "#/components/parameters/PolicyRuleID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyRuleInput" }
+      responses:
+        "200":
+          description: Update berhasil
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+        "400":
+          description: Body tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      tags: [PolicyRules]
+      summary: Hapus rule
+      parameters:
+        - $ref: "#/components/parameters/PolicyRuleID"
+      responses:
+        "200":
+          description: Berhasil dihapus
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  # ── Settings ────────────────────────────────────────────────────────────
+  /api/settings:
+    get:
+      tags: [Settings]
+      summary: Ambil semua setting
+      description: Threshold CPU/RAM, konfigurasi Telegram, Email, dll — sebagai key-value string.
+      responses:
+        "200":
+          description: Map key-value setting
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                example:
+                  cpu_threshold: "80"
+                  ram_threshold: "85"
+                  offline_after_minutes: "5"
+                  auto_kill_enabled: "false"
+                  telegram_token: ""
+                  telegram_chat_id: ""
+                  smtp_host: ""
+                  lease_minutes: "10"
+                  default_max_retry: "3"
+    post:
+      tags: [Settings]
+      summary: Update setting (key-value)
+      description: Langsung berlaku tanpa restart server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              example:
+                cpu_threshold: "90"
+                auto_kill_enabled: "true"
+      responses:
+        "200":
+          description: Update berhasil
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+        "400":
+          description: Body tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── Audit ───────────────────────────────────────────────────────────────
+  /api/audit:
+    get:
+      tags: [Audit]
+      summary: List audit log
+      description: Siapa melakukan apa — kill process, delete agent, deploy, upload, dll.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        "200":
+          description: Daftar audit log
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AuditLog" }
+
+  # ── Health & Stats ──────────────────────────────────────────────────────
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Status server
+      responses:
+        "200":
+          description: Uptime & jumlah agent online
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  uptime:
+                    type: string
+                    example: "3h12m5s"
+                  agents_online:
+                    type: integer
+
+  /api/stats:
+    get:
+      tags: [Health]
+      summary: Ringkasan statistik
+      responses:
+        "200":
+          description: Jumlah online & alert hari ini
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  online:
+                    type: integer
+                  today_alerts:
+                    type: integer
+
+  # ── Deploy ──────────────────────────────────────────────────────────────
+  /api/deploy:
+    get:
+      tags: [Deploy]
+      summary: List semua deploy job
+      responses:
+        "200":
+          description: Daftar deploy job (maks 100 terbaru)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DeployJob" }
+    post:
+      tags: [Deploy]
+      summary: Buat deploy job baru ke satu/banyak PC
+      description: |
+        `type` yang didukung (divalidasi di `validateDeployRequest`):
+        - `exec` — jalankan PowerShell command bebas (maks 8192 karakter)
+        - `winget` — format wajib `winget install|uninstall --id <PackageID>`
+        - `file_deploy` — jalankan file yang sudah diupload (lihat `args`)
+        - `deepfreeze` — payload harus `thaw` / `freeze` / `query_df`
+        - `install_ssh` — install SSH di PC target, tanpa payload
+        - `msiexec_uninstall` / `quiet_uninstall` — **server-internal**, hanya
+          dibuat oleh `POST /api/v1/software/uninstall` dari baris inventory
+          tersimpan, tidak pernah dari input frontend
+
+        Tercatat di audit log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, targets]
+              properties:
+                type:
+                  type: string
+                  enum: [exec, winget, file_deploy, deepfreeze, install_ssh, msiexec_uninstall, quiet_uninstall]
+                payload:
+                  type: string
+                  description: Wajib diisi kecuali type=install_ssh
+                args:
+                  type: string
+                targets:
+                  type: array
+                  items:
+                    type: string
+                  description: Daftar agent ID tujuan
+                priority:
+                  type: integer
+                  default: 0
+                expire_at:
+                  type: string
+                  format: date-time
+                  description: RFC3339, harus di masa depan
+                max_retry:
+                  type: integer
+                  nullable: true
+                  description: Default dari config.yaml (`deploy.default_max_retry`) kalau tidak diisi
+      responses:
+        "200":
+          description: Job berhasil dibuat
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeployJob" }
+        "400":
+          description: Request tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/deploy/{id}:
+    get:
+      tags: [Deploy]
+      summary: Detail 1 job + hasil per PC
+      parameters:
+        - $ref: "#/components/parameters/DeployJobID"
+      responses:
+        "200":
+          description: Detail job dan hasil eksekusi per agent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job:
+                    $ref: "#/components/schemas/DeployJob"
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/DeployResult" }
+        "404":
+          description: Job tidak ditemukan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      tags: [Deploy]
+      summary: Cancel deploy job
+      parameters:
+        - $ref: "#/components/parameters/DeployJobID"
+      responses:
+        "200":
+          description: Job berhasil dibatalkan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /api/upload:
+    post:
+      tags: [Deploy]
+      summary: Upload installer
+      description: Hanya menerima `.exe`, `.msi`, `.bat`, `.ps1`. Tercatat di audit log.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Upload berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  filename:
+                    type: string
+        "400":
+          description: File tidak valid / tipe tidak diizinkan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          description: Ukuran file melebihi batas
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── Test Notifikasi ─────────────────────────────────────────────────────
+  /api/test/telegram:
+    post:
+      tags: [Notifications]
+      summary: Kirim pesan test ke Telegram bot
+      responses:
+        "200":
+          description: Berhasil terkirim
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+        "500":
+          description: Gagal mengirim
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/test/email:
+    post:
+      tags: [Notifications]
+      summary: Kirim email test
+      responses:
+        "200":
+          description: Berhasil terkirim
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+        "500":
+          description: Gagal mengirim
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── Logs ────────────────────────────────────────────────────────────────
+  /api/logs:
+    get:
+      tags: [Logs]
+      summary: Tail logs/server.log
+      parameters:
+        - name: lines
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 10000
+      responses:
+        "200":
+          description: Isi log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lines:
+                    type: string
+
+  # ── Clients v1 ──────────────────────────────────────────────────────────
+  /api/v1/clients:
+    get:
+      tags: [ClientsV1]
+      summary: List proyeksi read-only agent
+      description: |
+        Proyeksi tipis dari data agent, dipakai konsumen eksternal seperti Veyon
+        sync service. Tidak menyertakan metrics real-time.
+      responses:
+        "200":
+          description: Daftar client
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ClientSummary" }
+
+  # ── Computers v1 ────────────────────────────────────────────────────────
+  /api/v1/computers:
+    get:
+      tags: [ComputersV1]
+      summary: List komputer terkelola (read-only)
+      description: |
+        Proyeksi lebih sempit dari `GET /api/v1/clients` — hanya identitas mesin +
+        lokasi fisik, untuk konsumen eksternal seperti Veyon sync worker. Response
+        **array JSON polos** (bukan envelope `{success,data}`), dibaca langsung
+        dari tabel `agents`, urut `hostname ASC`.
+      parameters:
+        - name: floor
+          in: query
+          schema:
+            type: string
+          description: Filter exact-match lantai (case-sensitive), mis. `?floor=Floor%204`
+        - name: hostname
+          in: query
+          schema:
+            type: string
+          description: Filter exact-match hostname
+      responses:
+        "200":
+          description: Daftar komputer (array kosong `[]` kalau tidak ada yang cocok — bukan 404)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Computer" }
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── Software Inventory v1 ──────────────────────────────────────────────
+  /api/v1/software:
+    get:
+      tags: [Software]
+      summary: Inventory software fleet-wide (agregat per identity key)
+      description: |
+        Setiap baris `software_inventory` dikelompokkan per identity key jadi satu
+        baris fleet-wide per software logis. Perbedaan versi / tipe install /
+        platform antar endpoint di-surface sebagai `varies` / `mixed`, bukan
+        dipilih salah satu. Response array JSON polos.
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+          description: Substring match ke display_name / publisher
+        - name: install_type
+          in: query
+          schema:
+            type: string
+            enum: [msi, exe, mixed]
+        - name: update_status
+          in: query
+          schema:
+            type: string
+            enum: [up_to_date, update_available, unknown]
+        - name: platform
+          in: query
+          schema:
+            type: string
+            enum: [x64, x86, mixed]
+      responses:
+        "200":
+          description: Daftar software teragregasi
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SoftwareAggregateRow" }
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/software/{identity_key}/endpoints:
+    get:
+      tags: [Software]
+      summary: Drill-down — semua endpoint yang saat ini melaporkan software ini
+      parameters:
+        - name: identity_key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Daftar baris per-endpoint (array kosong `[]` kalau tidak ada — bukan 404)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SoftwareInventoryRow" }
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/software/uninstall:
+    post:
+      tags: [Software]
+      summary: Uninstall software dari satu / banyak endpoint
+      description: |
+        Frontend hanya mengirim identitas software + daftar endpoint — **tidak
+        pernah** perintah uninstall. Untuk tiap agent, mekanisme uninstall
+        di-resolve server-side dari baris inventory milik agent itu sendiri
+        (`classifyUninstall`): Tier A `msiexec_uninstall`, Tier B `quiet_uninstall`,
+        Tier C `winget`, Tier D unsupported. Satu deploy job per (agent, tier),
+        lewat antrean `deploy_jobs` yang sama. Tercatat di audit log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identity_key, agent_ids]
+              properties:
+                identity_key:
+                  type: string
+                agent_ids:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: |
+            `jobs` = job yang berhasil dibuat; `skipped` = endpoint yang dilewati
+            beserta alasannya (software tidak terpasang di endpoint itu, Tier D
+            unsupported, lookup/dispatch gagal). Tetap HTTP 200 walau semua
+            endpoint di-skip.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        agent_id:
+                          type: string
+                        job_id:
+                          type: string
+                        tier:
+                          type: string
+                          enum: [A, B, C]
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        agent_id:
+                          type: string
+                        reason:
+                          type: string
+        "400":
+          description: identity_key / agent_ids kosong, atau body tidak valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── Commands (generic Command API v1) ──────────────────────────────────
+  /api/v1/commands:
+    post:
+      tags: [Commands]
+      summary: Buat command job generik (restart/shutdown/lock/kill_process/dst)
+      description: |
+        Endpoint tunggal untuk semua aksi remote yang dieksekusi Windows agent,
+        menggantikan gaya banyak endpoint per-aksi (POST /shutdown, POST /restart,
+        dst). **Tidak mengeksekusi apa pun secara langsung** — request ini membuat
+        satu `DeployJob` (tabel `deploy_jobs`/`deploy_results` yang sama dipakai
+        `POST /api/deploy`), lalu job tersebut dipickup oleh dispatcher/queue yang
+        sudah ada (`Deployer.CreateJob` → `PumpAgent` → WebSocket ke agent).
+        Kalau target sedang offline, command tetap tersimpan di queue dan baru
+        dikirim saat agent reconnect (perilaku sama seperti `POST /api/deploy`).
+
+        **Resolusi `target`** — dicek berurutan sampai ada yang cocok:
+        1. Agent ID persis (lihat `GET /api/agents`)
+        2. Hostname, case-insensitive (mis. `pc-05`)
+        3. `device_group` persis (mis. `lab-a`)
+        4. `floor` persis (mis. `floor-4`)
+        5. Literal `all` — seluruh agent terdaftar (setara `"*"` di `targets`
+           milik `POST /api/deploy`)
+
+        Satu `target` bisa cocok dengan banyak agent sekaligus (mis. semua PC di
+        `floor-4`) — command akan di-fan-out ke semuanya di bawah satu `job_id`
+        yang sama; lihat progres per-agent lewat `GET /api/v1/commands/{job_id}`.
+
+        **Pemetaan `action` → mekanisme eksekusi:**
+
+        | action | parameters | mekanisme | catatan |
+        |---|---|---|---|
+        | `restart` | – | job `exec`: `Restart-Computer -Force` | sama seperti tool MCP `restart_pc` |
+        | `shutdown` | – | job `exec`: `Stop-Computer -Force` | sama seperti tool MCP `shutdown_pc` |
+        | `lock` | – | job `exec`: kunci sesi Windows aktif | |
+        | `unlock` | – | **tidak didukung** | Windows tidak menyediakan mekanisme remote-unlock tanpa inject credential — request ditolak `400` sebelum job dibuat |
+        | `logout` | – | job `exec`: logoff user aktif | |
+        | `sleep` | – | job `exec`: suspend PC ke sleep state | |
+        | `wake` | – | Wake-on-LAN — magic packet UDP ke `Agent.mac_address` | **bukan** lewat WebSocket agent (PC target sedang mati/tak terhubung); tidak ada acknowledgment dari PC, job ditandai `done` begitu paket terkirim |
+        | `kill_process` | `process` (string, wajib) | job `kill_process` (native, sama dipakai tool MCP `kill_process`) | versi asinkron/queued dari `POST /api/agents/{id}/kill` yang sinkron |
+        | `broadcast` | `message` (string, wajib) | job `exec`: tampilkan message box ke semua sesi aktif | konvensi: `target=all` |
+        | `popup` | `message` (string, wajib) | job `exec`: tampilkan message box | sama seperti `broadcast`, biasanya untuk satu/beberapa PC spesifik |
+        | `deploy` | `type`, `payload`, `args`, `priority`, `expire_at`, `max_retry` — identik body `POST /api/deploy` | passthrough langsung ke pipeline Deploy job | escape hatch penuh (exec/winget/file_deploy/deepfreeze/install_ssh), tidak dibatasi hanya ke aksi kanonik |
+        | `run_command` | `command` (string, wajib) | job `exec` dengan payload = `command` | setara `type=exec` di `POST /api/deploy` |
+        | `enable_wifi` / `disable_wifi` / `enable_lan` / `disable_lan` | – | job `network_mode`, mode baru dihitung dari `desired_network_mode` agent saat ini (mekanisme sama dengan `POST /api/agents/{id}/network-mode`) | ditolak `400` kalau hasil akhirnya membuat agent kehilangan seluruh konektivitas jaringan |
+        | `refresh_policy` | – | job baru: agent re-fetch & re-evaluate Policy Engine rules | perlu handler agent baru |
+        | `collect_inventory` | – | job baru: agent kirim ulang installed-software inventory | perlu handler agent baru |
+        | `take_screenshot` | – | job baru: agent ambil screenshot layar & upload | perlu handler agent baru |
+
+        Tercatat di audit log (sama seperti `POST /api/deploy`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommandRequest" }
+            examples:
+              shutdown:
+                summary: Shutdown satu PC
+                value: { target: "pc-05", action: "shutdown" }
+              restart:
+                summary: Restart satu PC
+                value: { target: "pc-05", action: "restart" }
+              kill_process:
+                summary: Kill proses di satu PC
+                value:
+                  target: "pc-05"
+                  action: "kill_process"
+                  parameters: { process: "chrome.exe" }
+              broadcast:
+                summary: Broadcast pesan ke semua PC
+                value:
+                  target: "all"
+                  action: "broadcast"
+                  parameters: { message: "Library will close in 10 minutes." }
+              popup:
+                summary: Popup pesan ke satu lantai
+                value:
+                  target: "floor-4"
+                  action: "popup"
+                  parameters: { message: "Mohon simpan pekerjaan Anda." }
+              deploy_passthrough:
+                summary: Deploy job penuh lewat Command API (escape hatch)
+                value:
+                  target: "lab-a"
+                  action: "deploy"
+                  parameters:
+                    type: "winget"
+                    payload: "winget install --id 7zip.7zip"
+      responses:
+        "200":
+          description: Command job berhasil dibuat (tersimpan di queue, belum tentu sudah dieksekusi)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandResponse" }
+              examples:
+                dispatched:
+                  summary: PC online — job langsung dikirim
+                  value:
+                    job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: "dispatched"
+                    created_at: "2026-07-19T10:00:00+07:00"
+                    estimated_queue_position: 0
+                queued_multi_target:
+                  summary: Broadcast ke floor-4 — sebagian PC offline
+                  value:
+                    job_id: "8c2e1a10-9b3d-4f11-8a2b-1e6f2d4c5a90"
+                    status: "pending"
+                    created_at: "2026-07-19T10:05:00+07:00"
+                    estimated_queue_position: 1
+        "400":
+          description: target/action/parameters tidak valid, atau action tidak didukung (mis. unlock)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: target tidak cocok dengan agent manapun
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    get:
+      tags: [Commands]
+      summary: List command job terbaru
+      description: Ringkasan command job (maks 100 terbaru), analog `GET /api/deploy`. Untuk detail per-agent, pakai `GET /api/v1/commands/{job_id}`.
+      responses:
+        "200":
+          description: Daftar command job
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CommandSummary" }
+
+  /api/v1/commands/{job_id}:
+    get:
+      tags: [Commands]
+      summary: Status & hasil 1 command job
+      description: |
+        `job_id` sama persis dengan `DeployJob.id` — command job adalah `DeployJob`
+        biasa, jadi model polling-nya sama dengan `GET /api/deploy/{id}`.
+        `results` berisi hasil per-agent (satu baris `DeployResult` per target yang
+        cocok dari `target` saat command dibuat); `progress` adalah ringkasan
+        hitungan status dari `results`.
+      parameters:
+        - $ref: "#/components/parameters/CommandJobID"
+      responses:
+        "200":
+          description: Status command job
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandStatus" }
+        "404":
+          description: Command job tidak ditemukan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Token didapat dari `POST /api/login`, dikirim lewat header
+        `Authorization: Bearer <token>` (atau token mentah tanpa prefix "Bearer ").
+        Kosongkan `auth.admin_username` di config.yaml untuk menonaktifkan auth
+        sepenuhnya (mode development). Semua route `/api/*` dan `/api/v1/*` juga
+        melewati `adminMiddleware` (IP whitelist berbasis `auth.admin_cidrs`) sebelum
+        middleware ini, kalau whitelist diisi.
+
+  parameters:
+    AgentID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Agent ID (biasanya hostname atau ID unik yang dikirim agent)
+    ApplicationID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+    PolicyRuleID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+    DeployJobID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    CommandJobID:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Sama dengan DeployJob.id — command job adalah DeployJob biasa.
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+    OkResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+
+    Agent:
+      type: object
+      properties:
+        id:
+          type: string
+        hostname:
+          type: string
+        ip:
+          type: string
+        os:
+          type: string
+        last_seen:
+          type: string
+          format: date-time
+        mesh_id:
+          type: string
+        status:
+          type: string
+          example: online
+        created_at:
+          type: string
+          format: date-time
+        agent_version:
+          type: string
+        windows_version:
+          type: string
+        disk_capacity_gb:
+          type: number
+        device_group:
+          type: string
+        mac_address:
+          type: string
+        floor:
+          type: string
+        desired_network_mode:
+          type: string
+          enum: [ethernet, wifi, both]
+        current_network_mode:
+          type: string
+        network_mode_status:
+          type: string
+        network_mode_detail:
+          type: string
+        network_mode_updated_at:
+          type: string
+          format: date-time
+
+    AgentWithMetrics:
+      allOf:
+        - $ref: "#/components/schemas/Agent"
+        - type: object
+          properties:
+            cpu:
+              type: number
+            ram:
+              type: number
+            top_process:
+              type: string
+            installed_software_count:
+              type: integer
+            running_process_count:
+              type: integer
+
+    Metric:
+      type: object
+      properties:
+        id:
+          type: integer
+        agent_id:
+          type: string
+        cpu:
+          type: number
+        ram:
+          type: number
+        recorded_at:
+          type: string
+          format: date-time
+
+    Process:
+      type: object
+      properties:
+        name:
+          type: string
+        pid:
+          type: integer
+        cpu:
+          type: number
+        ram:
+          type: number
+        path:
+          type: string
+        product_name:
+          type: string
+        company:
+          type: string
+        description:
+          type: string
+        product_version:
+          type: string
+        size:
+          type: integer
+          format: int64
+        file_created_at:
+          type: string
+        file_modified_at:
+          type: string
+
+    Category:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+
+    Application:
+      type: object
+      properties:
+        id:
+          type: integer
+        exe_name:
+          type: string
+        company:
+          type: string
+        product_name:
+          type: string
+        description:
+          type: string
+        product_version:
+          type: string
+        category_id:
+          type: integer
+          nullable: true
+        status:
+          type: string
+          enum: [pending_review, allowed, blocked, ignored]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ApplicationWithStats:
+      allOf:
+        - $ref: "#/components/schemas/Application"
+        - type: object
+          properties:
+            category_name:
+              type: string
+            device_count:
+              type: integer
+            total_executions:
+              type: integer
+            first_seen:
+              type: string
+              format: date-time
+            last_seen:
+              type: string
+              format: date-time
+
+    AppSighting:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        hostname:
+          type: string
+        application_id:
+          type: integer
+        path:
+          type: string
+        size:
+          type: integer
+          format: int64
+        file_created_at:
+          type: string
+        file_modified_at:
+          type: string
+        first_seen:
+          type: string
+          format: date-time
+        last_seen:
+          type: string
+          format: date-time
+        exec_count:
+          type: integer
+
+    ApplicationDetail:
+      allOf:
+        - $ref: "#/components/schemas/ApplicationWithStats"
+        - type: object
+          properties:
+            sightings:
+              type: array
+              items: { $ref: "#/components/schemas/AppSighting" }
+
+    Event:
+      type: object
+      properties:
+        id:
+          type: integer
+        agent_id:
+          type: string
+        hostname:
+          type: string
+        type:
+          type: string
+          example: usb_inserted
+        metadata:
+          type: string
+          description: JSON string berisi detail event (bentuk bervariasi per tipe event)
+        action:
+          type: string
+          enum: [log, notify, blocked, deleted, killed]
+        created_at:
+          type: string
+          format: date-time
+
+    PolicyRuleInput:
+      type: object
+      required: [name, action]
+      properties:
+        name:
+          type: string
+        event_type:
+          type: string
+          description: Kosong berarti berlaku untuk semua tipe event
+        category_id:
+          type: integer
+          nullable: true
+        app_status:
+          type: string
+          enum: ["", pending_review, allowed, blocked, ignored]
+        file_extension:
+          type: string
+        execution_location:
+          type: string
+          enum: ["", downloads, desktop, temp, usb]
+        device_group:
+          type: string
+        action:
+          type: string
+          enum: [log, notify, block, delete, kill]
+        enabled:
+          type: boolean
+          default: true
+
+    PolicyRule:
+      allOf:
+        - $ref: "#/components/schemas/PolicyRuleInput"
+        - type: object
+          properties:
+            id:
+              type: integer
+            created_at:
+              type: string
+              format: date-time
+
+    Alert:
+      type: object
+      properties:
+        id:
+          type: integer
+        agent_id:
+          type: string
+        type:
+          type: string
+          enum: [cpu_high, ram_high, blacklisted_app, offline, recovery, peripheral_removed]
+        message:
+          type: string
+        sent_at:
+          type: string
+          format: date-time
+
+    DeployJob:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [exec, winget, file_deploy, deepfreeze, install_ssh, msiexec_uninstall, quiet_uninstall, network_mode, wake]
+          description: >
+            `msiexec_uninstall` / `quiet_uninstall` dibuat server-side oleh
+            `POST /api/v1/software/uninstall`. `network_mode` / `wake` adalah
+            pseudo-type yang dibuat Command API (`enable_wifi`/`disable_wifi`/
+            `enable_lan`/`disable_lan` dan `wake`) — job-nya tidak lewat dispatch
+            queue biasa, hanya dipakai supaya command punya `job_id` untuk
+            di-poll.
+        payload:
+          type: string
+        args:
+          type: string
+        targets:
+          type: string
+          description: Daftar agent ID tujuan, dipisah koma
+        status:
+          type: string
+          enum: [pending, running, dispatched, done, cancelled]
+          description: >
+            `dispatched` berarti job sudah terkirim ke setiap target yang online
+            saat dibuat (lihat Deployer.CreateJob) — status transisi antara
+            `pending` dan `done`, target offline yang belum menerima job tetap
+            membuat job secara keseluruhan berstatus `pending`.
+        priority:
+          type: integer
+        expire_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    DeployResult:
+      type: object
+      properties:
+        id:
+          type: integer
+        job_id:
+          type: string
+        agent_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, success, failed, cancelled, deferred, ok]
+          description: >
+            `deferred` dipakai command network-toggle saat agent offline (akan
+            reconcile otomatis saat reconnect). `ok` adalah nilai legacy yang
+            masih diperlakukan sebagai sukses oleh `GET /api/v1/commands/{job_id}`.
+        output:
+          type: string
+        executed_at:
+          type: string
+          format: date-time
+          nullable: true
+        lease_until:
+          type: string
+          format: date-time
+          nullable: true
+        retry_count:
+          type: integer
+        max_retry:
+          type: integer
+        exit_code:
+          type: integer
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+        ts:
+          type: string
+        action:
+          type: string
+        target:
+          type: string
+        detail:
+          type: string
+        ip:
+          type: string
+
+    ClientSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        hostname:
+          type: string
+        ip:
+          type: string
+        mac_address:
+          type: string
+        os:
+          type: string
+        agent_version:
+          type: string
+        status:
+          type: string
+        floor:
+          type: string
+        last_seen:
+          type: string
+          format: date-time
+
+    CommandAction:
+      type: string
+      enum:
+        - restart
+        - shutdown
+        - lock
+        - unlock
+        - logout
+        - sleep
+        - wake
+        - kill_process
+        - broadcast
+        - popup
+        - deploy
+        - run_command
+        - enable_wifi
+        - disable_wifi
+        - enable_lan
+        - disable_lan
+        - refresh_policy
+        - collect_inventory
+        - take_screenshot
+      description: |
+        Aksi remote yang bisa dieksekusi Windows agent lewat Command API. Lihat
+        tabel pemetaan action → mekanisme eksekusi di deskripsi
+        `POST /api/v1/commands` untuk parameter yang dibutuhkan tiap action serta
+        catatan penting (`unlock` tidak didukung, `wake` tidak lewat WebSocket
+        agent).
+
+    CommandRequest:
+      type: object
+      required: [target, action]
+      properties:
+        target:
+          type: string
+          description: |
+            Target tujuan command. Dicek berurutan sampai cocok: agent ID persis,
+            hostname (case-insensitive), device_group persis, floor persis, atau
+            literal `all` untuk seluruh agent. Bisa cocok dengan banyak agent
+            sekaligus (fan-out di bawah satu job_id yang sama).
+          example: pc-05
+        action:
+          $ref: "#/components/schemas/CommandAction"
+        parameters:
+          type: object
+          additionalProperties: true
+          description: Parameter tambahan, tergantung `action` — lihat tabel pemetaan di deskripsi endpoint.
+          example: { process: "chrome.exe" }
+        requested_by:
+          type: string
+          description: Identitas pemanggil (dashboard user, OpenClaw, Telegram user id, dll). Dipakai sebagai created_by di deploy job / audit log.
+        correlation_id:
+          type: string
+          description: ID opsional dari caller (mis. Telegram message id) untuk mengaitkan command dengan konteks di sistem eksternal. Dikembalikan apa adanya lewat GET /api/v1/commands/{job_id}.
+
+    CommandResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          description: Sama dengan DeployJob.id.
+        status:
+          type: string
+          enum: [pending, running, dispatched, done, cancelled]
+        created_at:
+          type: string
+          format: date-time
+        estimated_queue_position:
+          type: integer
+          description: |
+            Advisory saja — posisi antrean terburuk (worst-case) di antara semua
+            agent target yang berhasil diresolusi, dihitung saat job dibuat.
+            0 berarti job langsung dikirim ke setidaknya satu target.
+
+    CommandProgress:
+      type: object
+      description: Ringkasan hitungan status dari seluruh DeployResult milik command job ini.
+      properties:
+        total:
+          type: integer
+        dispatched:
+          type: integer
+        succeeded:
+          type: integer
+        failed:
+          type: integer
+        pending:
+          type: integer
+
+    CommandStatus:
+      type: object
+      properties:
+        job_id:
+          type: string
+        target:
+          type: string
+        action:
+          $ref: "#/components/schemas/CommandAction"
+        status:
+          type: string
+          enum: [pending, running, dispatched, done, cancelled]
+        correlation_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        progress:
+          $ref: "#/components/schemas/CommandProgress"
+        results:
+          type: array
+          description: Hasil per-agent — satu DeployResult per agent yang cocok dari `target` saat command dibuat.
+          items: { $ref: "#/components/schemas/DeployResult" }
+        error:
+          type: string
+          nullable: true
+          description: Agregat ringkas (output dari result pertama yang gagal), untuk kenyamanan. Lihat `results[]` untuk detail lengkap per-agent.
+
+    CommandSummary:
+      type: object
+      description: Versi ringan CommandStatus untuk GET /api/v1/commands (list).
+      properties:
+        job_id:
+          type: string
+        target:
+          type: string
+        action:
+          $ref: "#/components/schemas/CommandAction"
+        status:
+          type: string
+          enum: [pending, running, dispatched, done, cancelled]
+        created_at:
+          type: string
+          format: date-time
+
+    Computer:
+      type: object
+      description: Proyeksi minimal agent untuk GET /api/v1/computers — identitas + lokasi fisik saja.
+      properties:
+        hostname:
+          type: string
+        ip_address:
+          type: string
+        mac_address:
+          type: string
+        floor:
+          type: string
+
+    SoftwareAggregateRow:
+      type: object
+      description: Satu baris fleet-wide GET /api/v1/software — software logis yang sama (per identity key) dikolapskan lintas semua endpoint yang melaporkannya.
+      properties:
+        identity_key:
+          type: string
+        name:
+          type: string
+        vendor:
+          type: string
+        version:
+          type: string
+          description: Versi persis, atau `"varies"` kalau antar-endpoint berbeda
+        version_varies:
+          type: boolean
+        newest_update:
+          type: string
+          description: Versi terbaru yang tersedia menurut winget, kalau ada
+        install_type:
+          type: string
+          enum: [msi, exe, mixed]
+        update_status:
+          type: string
+          enum: [up_to_date, update_available, unknown]
+        platform:
+          type: string
+          enum: [x64, x86, mixed]
+        endpoint_count:
+          type: integer
+        any_uninstall_supported:
+          type: boolean
+
+    SoftwareInventoryRow:
+      type: object
+      description: Satu baris software_inventory (per agent + identity key), di-join ke hostname agent, plus klasifikasi tier uninstall & status update yang dihitung saat baca (tidak disimpan).
+      properties:
+        agent_id:
+          type: string
+        hostname:
+          type: string
+        identity_key:
+          type: string
+        display_name:
+          type: string
+        publisher:
+          type: string
+        display_version:
+          type: string
+        install_date:
+          type: string
+        windows_installer:
+          type: boolean
+        product_code:
+          type: string
+        uninstall_string:
+          type: string
+        quiet_uninstall_string:
+          type: string
+        hive:
+          type: string
+        arch:
+          type: string
+        scope:
+          type: string
+        winget_id:
+          type: string
+        winget_available_version:
+          type: string
+        first_seen:
+          type: string
+        last_seen:
+          type: string
+        update_status:
+          type: string
+          enum: [up_to_date, update_available, unknown]
+        uninstall_supported:
+          type: boolean
+        uninstall_tier:
+          type: string
+          enum: [A, B, C, D]
+          description: A = msiexec, B = quiet-uninstall string, C = winget fallback, D = tidak ada mekanisme silent uninstall
+        uninstall_reason:
+          type: string
+          description: Diisi hanya untuk tier D — alasan kenapa uninstall tidak didukung

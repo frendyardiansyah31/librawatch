@@ -1,6 +1,5 @@
 .claude/
 CLAUDE.md
-docs/
 
 # Compiled binaries
 *.exe
@@ -43,3 +42,13 @@ veyon_sync_config.json
 veyon_sync_config.example.json
 veyon_sync.py
 SESSION_MEMORY.md
+hasil-prep-checklist-fase-04.md
+AGENTS.md
+index layout floor monitoring pc.html
+index layout floor monitoring pc2.html
+INVESTIGASI-NETWORK-MODE.md
+plan-checklist-librawatch-mobile.md
+prompt-dokumentasi-teknis-umum.md
+.clinerules/
+.cursor/
+.windsurf/
